@@ -14,6 +14,15 @@ from pydantic import BaseModel
 from typing import Optional
 
 app = FastAPI(title="Enara Avatar Adapter")
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://enara-platform-production-12bb.up.railway.app"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 security = HTTPBearer()
 
 ENARA_BASE_URL   = os.environ["ENARA_BASE_URL"]
