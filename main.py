@@ -1,5 +1,5 @@
 """
-Enara AI <-> Beyond Presence / Tavus Adapter
+Enara AI <-> Tavus Adapter
 """
 
 import json
@@ -16,22 +16,18 @@ from typing import Optional
 app = FastAPI(title="Enara Avatar Adapter")
 security = HTTPBearer()
 
-ENARA_BASE_URL   = os.environ.get("ENARA_BASE_URL", "https://enaraai--enara-api-orchestrator-rest-api.modal.run")
-ENARA_API_KEY    = os.environ.get("ENARA_API_KEY", "RXXwdF3tfxbLlu0LAbEEBlt0Yf4F5W2cfzc_6CrZcZM")
-ADAPTER_TOKEN    = os.environ.get("ADAPTER_TOKEN", "EnaraAvatar2026!")
-TAVUS_API_KEY    = os.environ.get("TAVUS_API_KEY", "17db3043faa049a38e7b8c255c298ed5")
-TAVUS_REPLICA_ID = os.environ.get("TAVUS_REPLICA_ID", "r987f6e6f73c")
+ENARA_BASE_URL   = os.environ["ENARA_BASE_URL"]
+ENARA_API_KEY    = os.environ["ENARA_API_KEY"]
+ADAPTER_TOKEN    = os.environ["ADAPTER_TOKEN"]
+TAVUS_API_KEY    = os.environ["TAVUS_API_KEY"]
+TAVUS_REPLICA_ID = os.environ["TAVUS_REPLICA_ID"]
 
-
-# ── Auth ───────────────────────────────────────────────────────────────────────
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if credentials.credentials != ADAPTER_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return credentials.credentials
 
-
-# ── Models ─────────────────────────────────────────────────────────────────────
 
 class ChatMessage(BaseModel):
     role: str
@@ -45,8 +41,6 @@ class ChatCompletionRequest(BaseModel):
     section_ids: Optional[list[str]] = None
     teaching_method: Optional[str] = "socratic"
 
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def extract_enara_context(messages: list[ChatMessage]) -> dict:
     for msg in messages:
@@ -81,8 +75,6 @@ def sse_chunk(content: str, model: str, finish: bool = False) -> str:
     }
     return f"data: {json.dumps(chunk)}\n\n"
 
-
-# ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
