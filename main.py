@@ -113,7 +113,7 @@ async def chat_completions(
     teaching_method = request.teaching_method or ctx.get("teaching_method", "socratic")
 
     if not course_id:
-        raise HTTPException(status_code=400, detail="course_id is required.")
+    course_id = "336627af-732e-4349-bda8-b73c702dcf42"
 
     enara_payload = {
         "course_id":       course_id,
