@@ -30,16 +30,7 @@ ENARA_BASE_URL   = os.environ["ENARA_BASE_URL"]
 ENARA_API_KEY    = os.environ["ENARA_API_KEY"]
 ADAPTER_TOKEN    = os.environ["ADAPTER_TOKEN"]
 TAVUS_API_KEY    = os.environ["TAVUS_API_KEY"]
-json={
-    "replica_id": TAVUS_REPLICA_ID,
-    "custom_llm_url": "https://enara-platform-production-12bb.up.railway.app/v1/chat/completions",
-    "conversational_context": (
-        "{\"course_id\": \"336627af-732e-4349-bda8-b73c702dcf42\", \"section_ids\": [], \"teaching_method\": \"socratic\"}\n\n"
-        "You are Enara, an AI tutor helping students master their course material. "
-        "Guide students using the Socratic method. "
-        "Keep responses short since they will be spoken aloud. "
-        "Respond in the same language the student uses, Arabic or English."
-    ),
+TAVUS_REPLICA_ID = os.environ["TAVUS_REPLICA_ID"]
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -192,7 +183,9 @@ async def create_tavus_conversation(
                 },
                 json={
                     "replica_id": TAVUS_REPLICA_ID,
+                    "custom_llm_url": "https://enara-platform-production-12bb.up.railway.app/v1/chat/completions",
                     "conversational_context": (
+                        "{\"course_id\": \"336627af-732e-4349-bda8-b73c702dcf42\", \"section_ids\": [], \"teaching_method\": \"socratic\"}\n\n"
                         "You are Enara, an AI tutor helping students master their course material. "
                         "Guide students using the Socratic method — ask questions rather than just giving answers. "
                         "Keep responses short since they will be spoken aloud. "
