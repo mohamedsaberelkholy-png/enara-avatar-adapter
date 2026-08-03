@@ -220,18 +220,22 @@ async def create_tavus_conversation(
         try:
             pal_id = await get_or_create_pal(client)
 
+            payload = {
+                "persona_id": pal_id,
+                "replica_id": TAVUS_REPLICA_ID,
+                "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}"
+            }
+            print(f"DEBUG sending to Tavus: persona_id={pal_id} replica_id={TAVUS_REPLICA_ID} api_key={TAVUS_API_KEY[:8]}", flush=True)
+
             resp = await client.post(
                 "https://tavusapi.com/v2/conversations",
                 headers={
                     "x-api-key": TAVUS_API_KEY,
                     "Content-Type": "application/json"
                 },
-                json={
-                    "persona_id": pal_id,
-                    "replica_id": TAVUS_REPLICA_ID,
-                    "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}"
-                }
+                json=payload
             )
+            print(f"DEBUG Tavus response {resp.status_code}: {resp.text}", flush=True)
             resp.raise_for_status()
             data = resp.json()
             return {
