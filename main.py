@@ -228,6 +228,7 @@ async def create_tavus_conversation(
                 },
                 json={
                     "persona_id": pal_id,
+                    "replica_id": TAVUS_REPLICA_ID,
                     "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}"
                 }
             )
