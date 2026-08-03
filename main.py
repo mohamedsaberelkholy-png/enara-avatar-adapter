@@ -137,6 +137,24 @@ async def health():
     return {"status": "healthy", "pal_id": TAVUS_PAL_ID or "not yet created"}
 
 
+@app.get("/v1/tavus/credits")
+async def get_credits(_token: str = Depends(verify_token)):
+    """Returns remaining Tavus conversational credits."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.get(
+                "https://tavusapi.com/v2/credits",
+                headers={"x-api-key": TAVUS_API_KEY}
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Tavus API error: {e.response.status_code} - {e.response.text}"
+            )
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
