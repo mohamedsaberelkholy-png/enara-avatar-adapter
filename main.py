@@ -32,6 +32,10 @@ ADAPTER_TOKEN    = os.environ["ADAPTER_TOKEN"]
 TAVUS_API_KEY    = os.environ["TAVUS_API_KEY"]
 TAVUS_REPLICA_ID = os.environ["TAVUS_REPLICA_ID"]
 
+# PAL ID — created once via /v2/pals and stored here.
+# If empty, the adapter will create one on first conversation request.
+TAVUS_PAL_ID = os.environ.get("TAVUS_PAL_ID", "p9892496020e")
+
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if credentials.credentials != ADAPTER_TOKEN:
@@ -86,9 +90,51 @@ def sse_chunk(content: str, model: str, finish: bool = False) -> str:
     return f"data: {json.dumps(chunk)}\n\n"
 
 
+async def get_or_create_pal(client: httpx.AsyncClient) -> str:
+    """Returns the PAL ID to use for conversations.
+    If TAVUS_PAL_ID env var is set, use it directly.
+    Otherwise create a new PAL and return its ID.
+    """
+    global TAVUS_PAL_ID
+
+    if TAVUS_PAL_ID:
+        return TAVUS_PAL_ID
+
+    # Create a new PAL with Enara as the custom LLM
+    resp = await client.post(
+        "https://tavusapi.com/v2/pals",
+        headers={
+            "x-api-key": TAVUS_API_KEY,
+            "Content-Type": "application/json",
+        },
+        json={
+            "pal_name": "Enara AI Tutor",
+            "system_prompt": (
+                "You are Enara, an AI tutor helping students master their course material. "
+                "Guide students using the Socratic method — ask questions rather than just giving answers. "
+                "Keep responses short since they will be spoken aloud. "
+                "Respond in the same language the student uses, Arabic or English."
+            ),
+            "pipeline_mode": "full",
+            "default_face_id": TAVUS_REPLICA_ID,
+            "layers": {
+                "llm": {
+                    "model": "enara-tutor",
+                    "base_url": "https://enara-avatar-adapter-production.up.railway.app/v1",
+                    "api_key": ADAPTER_TOKEN,
+                }
+            }
+        }
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    TAVUS_PAL_ID = data["pal_id"]
+    return TAVUS_PAL_ID
+
+
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "pal_id": TAVUS_PAL_ID or "not yet created"}
 
 
 @app.post("/v1/chat/completions")
@@ -108,12 +154,9 @@ async def chat_completions(
         raise HTTPException(status_code=400, detail="No user message found")
 
     ctx = extract_enara_context(messages)
-    course_id       = request.course_id       or ctx.get("course_id")
+    course_id       = request.course_id       or ctx.get("course_id", "336627af-732e-4349-bda8-b73c702dcf42")
     section_ids     = request.section_ids     or ctx.get("section_ids", [])
     teaching_method = request.teaching_method or ctx.get("teaching_method", "socratic")
-
-    if not course_id:
-    course_id = "336627af-732e-4349-bda8-b73c702dcf42"
 
     enara_payload = {
         "course_id":       course_id,
@@ -172,9 +215,11 @@ async def chat_completions(
 async def create_tavus_conversation(
     _token: str = Depends(verify_token)
 ):
-    """Creates a Tavus conversation session and returns the embed URL."""
+    """Creates a Tavus conversation session using a PAL and returns the embed URL."""
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
+            pal_id = await get_or_create_pal(client)
+
             resp = await client.post(
                 "https://tavusapi.com/v2/conversations",
                 headers={
@@ -182,16 +227,7 @@ async def create_tavus_conversation(
                     "Content-Type": "application/json"
                 },
                 json={
-                    "replica_id": TAVUS_REPLICA_ID,
-                    "custom_llm_url": "https://enara-platform-production-12bb.up.railway.app/v1/chat/completions",
-                    "conversational_context": (
-                        "{\"course_id\": \"336627af-732e-4349-bda8-b73c702dcf42\", \"section_ids\": [], \"teaching_method\": \"socratic\"}\n\n"
-                        "You are Enara, an AI tutor helping students master their course material. "
-                        "Guide students using the Socratic method — ask questions rather than just giving answers. "
-                        "Keep responses short since they will be spoken aloud. "
-                        "Respond in the same language the student uses, Arabic or English."
-                    ),
-                    "custom_greeting": "Welcome! I'm Enara, your AI tutor. What would you like to learn today?",
+                    "pal_id": pal_id,
                     "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}"
                 }
             )
@@ -204,5 +240,5 @@ async def create_tavus_conversation(
         except httpx.HTTPStatusError as e:
             raise HTTPException(
                 status_code=502,
-                detail=f"Tavus API error: {e.response.status_code}"
+                detail=f"Tavus API error: {e.response.status_code} - {e.response.text}"
             )
