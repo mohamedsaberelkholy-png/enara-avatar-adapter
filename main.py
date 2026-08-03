@@ -229,6 +229,27 @@ async def chat_completions(
     )
 
 
+@app.delete("/v1/tavus/conversation/{conversation_id}")
+async def end_tavus_conversation(
+    conversation_id: str,
+    _token: str = Depends(verify_token)
+):
+    """Ends a Tavus conversation session to stop credit consumption."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.delete(
+                f"https://tavusapi.com/v2/conversations/{conversation_id}",
+                headers={"x-api-key": TAVUS_API_KEY}
+            )
+            resp.raise_for_status()
+            return {"ended": True, "conversation_id": conversation_id}
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Tavus API error: {e.response.status_code} - {e.response.text}"
+            )
+
+
 @app.post("/v1/tavus/conversation")
 async def create_tavus_conversation(
     _token: str = Depends(verify_token)
