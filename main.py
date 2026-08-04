@@ -22,10 +22,9 @@ async def warmup_modal():
     while True:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.post(
-                    f"{ENARA_BASE_URL}/chat/query",
-                    headers={"X-API-Key": ENARA_API_KEY, "Content-Type": "application/json"},
-                    json={"course_id": "336627af-732e-4349-bda8-b73c702dcf42", "query": "ping", "section_ids": [], "teaching_method": "socratic", "chat_history": []}
+                await client.get(
+                    f"{ENARA_BASE_URL}/health",
+                    headers={"X-API-Key": ENARA_API_KEY},
                 )
         except Exception:
             pass  # ignore errors — this is best-effort warming
