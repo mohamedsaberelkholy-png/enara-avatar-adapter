@@ -7,6 +7,8 @@ import time
 import uuid
 import httpx
 import os
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -14,7 +16,28 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
 
-app = FastAPI(title="Enara Avatar Adapter")
+async def warmup_modal():
+    """Ping Enara Modal backend every 4 minutes to prevent cold starts."""
+    await asyncio.sleep(10)  # wait for startup
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{ENARA_BASE_URL}/chat/query",
+                    headers={"X-API-Key": ENARA_API_KEY, "Content-Type": "application/json"},
+                    json={"course_id": "336627af-732e-4349-bda8-b73c702dcf42", "query": "ping", "section_ids": [], "teaching_method": "socratic", "chat_history": []}
+                )
+        except Exception:
+            pass  # ignore errors — this is best-effort warming
+        await asyncio.sleep(240)  # ping every 4 minutes
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(warmup_modal())
+    yield
+
+app = FastAPI(title="Enara Avatar Adapter", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
