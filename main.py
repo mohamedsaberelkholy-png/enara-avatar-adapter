@@ -82,6 +82,12 @@ def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
     return history
 
 
+def detect_language(text: str) -> str:
+    """Detect if the message is Arabic or English."""
+    arabic_chars = sum(1 for c in text if '؀' <= c <= 'ۿ')
+    return "arabic" if arabic_chars > len(text) * 0.2 else "english"
+
+
 def sse_chunk(content: str, model: str, finish: bool = False) -> str:
     chunk = {
         "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
@@ -183,12 +189,15 @@ async def chat_completions(
     section_ids     = request.section_ids     or ctx.get("section_ids", [])
     teaching_method = request.teaching_method or ctx.get("teaching_method", "socratic")
 
+    language = detect_language(user_query)
+
     enara_payload = {
         "course_id":       course_id,
         "query":           user_query,
         "section_ids":     section_ids,
         "teaching_method": teaching_method,
         "chat_history":    build_chat_history(messages),
+        "language":        language,
     }
 
     async def generate():
