@@ -29,6 +29,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 security = HTTPBearer()
@@ -192,7 +193,7 @@ async def get_or_create_pal(client: httpx.AsyncClient) -> str:
 
 
 @app.get("/v1/artifact/{session_key}")
-async def get_artifact(session_key: str, _token: str = Depends(verify_token)):
+async def get_artifact(session_key: str):
     """Poll for a visual artifact. Returns html if available, null if not."""
     # Clean expired artifacts
     now = time.time()
