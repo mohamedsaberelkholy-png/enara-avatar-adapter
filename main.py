@@ -82,6 +82,52 @@ def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
     return history
 
 
+async def generate_visual(question: str, answer: str, conversation_id: str):
+    """Ask Claude Haiku if a visual is needed and generate it if so."""
+    if not ANTHROPIC_API_KEY:
+        return
+
+    prompt = f"""You are a visual aid generator for an AI tutor.
+
+Student question: {question}
+Tutor answer: {answer}
+
+Decide if a visual aid would genuinely help understanding (grammar tables, verb conjugations, 
+comparisons, timelines, vocabulary lists, step-by-step processes). 
+Simple conversational exchanges do NOT need visuals.
+
+If a visual would help: respond with ONLY a clean, self-contained HTML snippet using inline styles.
+Use a white background, clean fonts, teal (#0A5F6D) as accent color, max-width 100%.
+If no visual is needed: respond with exactly: NO_VISUAL"""
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            result = data["content"][0]["text"].strip()
+
+            if result != "NO_VISUAL" and "<" in result:
+                artifact_store[conversation_id] = {
+                    "html": result,
+                    "expires_at": time.time() + 60
+                }
+    except Exception as e:
+        print(f"Visual generation error: {e}", flush=True)
+
+
 def detect_language(text: str) -> str:
     """Detect if the message is Arabic or English."""
     arabic_chars = sum(1 for c in text if '؀' <= c <= 'ۿ')
@@ -143,6 +189,22 @@ async def get_or_create_pal(client: httpx.AsyncClient) -> str:
     data = resp.json()
     TAVUS_PAL_ID = data["pal_id"]
     return TAVUS_PAL_ID
+
+
+@app.get("/v1/artifact/{session_key}")
+async def get_artifact(session_key: str, _token: str = Depends(verify_token)):
+    """Poll for a visual artifact. Returns html if available, null if not."""
+    # Clean expired artifacts
+    now = time.time()
+    expired = [k for k, v in artifact_store.items() if v["expires_at"] < now]
+    for k in expired:
+        del artifact_store[k]
+
+    artifact = artifact_store.get(session_key)
+    if artifact:
+        del artifact_store[session_key]  # consume it
+        return {"html": artifact["html"], "session_key": session_key}
+    return {"html": None, "session_key": session_key}
 
 
 @app.get("/health")
@@ -227,6 +289,11 @@ async def chat_completions(
                 return
 
         answer = data.get("answer", "")
+
+        # Generate visual in background using a session key derived from message history
+        session_key = str(hash(tuple(m.content for m in request.messages)))[-8:]
+        asyncio.create_task(generate_visual(user_query, answer, session_key))
+
         words = answer.split(" ")
         for i, word in enumerate(words):
             chunk = word + (" " if i < len(words) - 1 else "")
