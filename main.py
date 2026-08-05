@@ -1,9 +1,68 @@
+import os
+import uuid
+import httpx
+from typing import Optional, List  # <-- FIXED: Explicitly importing Optional and List
+from fastapi import FastAPI, HTTPException, Header, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+app = FastAPI(title="Enara Avatar Adapter", version="1.0.0")
+
 # ---------------------------------------------------------------------------
-# Helper: Call Anthropic Claude safely (Haiku & Sonnet fallback)
+# 1. Global CORS Configuration (Allows all origins & preflight requests)
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]
+)
+
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    return JSONResponse(status_code=200, content={"status": "ok"})
+
+# Environment Variables
+ADAPTER_BEARER_TOKEN = os.getenv("ADAPTER_TOKEN", "EnaraAvatar2026!")
+TAVUS_API_KEY = os.getenv("TAVUS_API_KEY", "9813e2f240354329ae6d72f8d15170f9")
+TAVUS_PAL_ID = os.getenv("TAVUS_PAL_ID") or os.getenv("TAVUS_PERSONA_ID")
+TAVUS_REPLICA_ID = os.getenv("TAVUS_REPLICA_ID") or os.getenv("TAVUS_FACE_ID")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+# In-memory artifact storage
+ARTIFACT_STORE = {}
+
+# Security Helper
+async def verify_token(authorization: Optional[str] = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization Header")
+    token_parts = authorization.split()
+    if len(token_parts) != 2 or token_parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid token format")
+    if token_parts[1] != ADAPTER_BEARER_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return True
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class TavusChatRequest(BaseModel):
+    messages: List[ChatMessage]
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "Enara Avatar Adapter Production"}
+
+# ---------------------------------------------------------------------------
+# Helper: Call Anthropic Claude safely (Haiku 3.5 / Sonnet 3.5)
 # ---------------------------------------------------------------------------
 async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
     if not ANTHROPIC_API_KEY:
-        print("[WARNING] ANTHROPIC_API_KEY is not configured in environment.")
+        print("[WARNING] ANTHROPIC_API_KEY is missing from Railway environment variables.")
         return None
 
     system_prompt = """
@@ -11,20 +70,11 @@ async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
     Your job is to generate self-contained, modern, beautiful HTML visual aids to help students learn.
     
     RULES:
-    1. Output strictly ONLY raw HTML content inside <div> tags (no ```html code fences, no extra conversational text).
+    1. Output strictly ONLY raw HTML content inside <div> tags (no ```html code fences, no extra text).
     2. Support Arabic RTL (Right-to-Left) direction if prompt is in Arabic (direction: rtl; text-align: right;).
     3. Use clean inline CSS with modern UI cards, clear headers, icons/emojis, and bullet points.
     4. Make the design modern, responsive, readable, and visually appealing.
     """
-
-    # Resolve Base URL safely with explicit https:// scheme
-    raw_base_url = os.getenv("ANTHROPIC_BASE_URL", "[https://api.anthropic.com](https://api.anthropic.com)")
-    if not raw_base_url.startswith("http://") and not raw_base_url.startswith("https://"):
-        base_url = f"https://{raw_base_url}"
-    else:
-        base_url = raw_base_url
-
-    endpoint_url = f"{base_url.rstrip('/')}/v1/messages"
 
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
@@ -32,14 +82,15 @@ async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
         "content-type": "application/json"
     }
 
-    # Model identifiers list
     models_to_try = [
-        os.getenv("CLAUDE_MODEL", "claude-haiku-4-5"),
         "claude-3-5-haiku-20241022",
-        "claude-3-5-sonnet-20241022"
+        "claude-3-5-sonnet-20241022",
+        "claude-3-haiku-20240307"
     ]
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    endpoint_url = "[https://api.anthropic.com/v1/messages](https://api.anthropic.com/v1/messages)"
+
+    async with httpx.AsyncClient(timeout=25.0) as client:
         for model in models_to_try:
             payload = {
                 "model": model,
@@ -60,10 +111,61 @@ async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
                         html_code = html_code.replace("```", "").strip()
                     return html_code
                 else:
-                    print(f"[CLAUDE ERROR] Model '{model}' returned status {resp.status_code}: {resp.text}")
-            except httpx.RequestError as exc:
-                print(f"[HTTPX REQUEST EXCEPTION] Failed for model '{model}' at '{endpoint_url}': {exc}")
+                    print(f"[CLAUDE ERROR] Model '{model}' failed ({resp.status_code}): {resp.text}")
             except Exception as e:
-                print(f"[CLAUDE EXCEPTION] {e}")
+                print(f"[CLAUDE EXCEPTION] Model '{model}' request failed: {e}")
 
     return None
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/v1/artifact/{session_key}")
+async def get_artifact(session_key: str):
+    html_content = ARTIFACT_STORE.get(session_key)
+    return {"html": html_content}
+
+@app.post("/v1/chat/completions")
+async def text_chat_completion(
+    request: TavusChatRequest,
+    authenticated: bool = Depends(verify_token)
+):
+    try:
+        user_message = request.messages[-1].content if request.messages else ""
+        session_key = f"text_sess_{uuid.uuid4().hex[:8]}"
+
+        html_artifact = await generate_claude_visual_artifact(user_message)
+
+        if html_artifact:
+            ARTIFACT_STORE[session_key] = html_artifact
+            reply_text = f"لقد قمت بإنشاء لوحة توضيحية لك بناءً على سؤالك: '{user_message}'"
+        else:
+            reply_text = f"تم استلام طلبك: '{user_message}' (لم يتم توليد لوحة بصرية)"
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": session_key,
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": reply_text
+                        }
+                    }
+                ],
+                "artifact_key": session_key if session_key in ARTIFACT_STORE else None
+            }
+        )
+    except Exception as err:
+        print(f"[CHAT ERROR] Unhandled exception: {err}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error", "detail": str(err)}
+        )
+
+# Bind dynamically to Railway's $PORT
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
