@@ -148,6 +148,47 @@ async def set_artifact(session_key: str, request: Request, authenticated: bool =
         return {"status": "stored", "session_key": session_key}
     raise HTTPException(status_code=400, detail="Missing HTML payload")
 
+# ---------------------------------------------------------------------------
+# 4. Pure Text Interaction Endpoint (No Tavus Video Required)
+# ---------------------------------------------------------------------------
+@app.post("/v1/chat/completions")
+async def text_chat_completion(
+    request: TavusChatRequest,
+    authenticated: bool = Depends(verify_token)
+):
+    """
+    Processes text turns directly through the LLM backend.
+    Generates text responses and optionally stores a visual HTML artifact.
+    """
+    user_message = request.messages[-1].content if request.messages else ""
+    session_key = f"text_sess_{uuid.uuid4().hex[:8]}"
+
+    # Mock or integrate your LLM/Claude response logic here
+    reply_text = f"Received your text turn: '{user_message}'. Here is your answer."
+
+    # Example: If user asks for a visual aid, generate and store an artifact
+    if any(keyword in user_message.lower() for keyword in ["visual", "artifact", "درس", "رسم", "شرح"]):
+        artifact_html = f"""
+        <div style="font-family: system-ui; padding: 20px; direction: rtl; text-align: right;">
+            <h3 style="color: #0d9488;">لوحة توضيحية لطلبك:</h3>
+            <p>{user_message}</p>
+        </div>
+        """
+        ARTIFACT_STORE[session_key] = artifact_html
+
+    return {
+        "id": session_key,
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": reply_text
+                }
+            }
+        ],
+        "artifact_key": session_key if session_key in ARTIFACT_STORE else None
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
