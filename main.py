@@ -103,11 +103,17 @@ def extract_enara_context(messages: list[ChatMessage]) -> dict:
 
 def extract_session_key(messages: list[ChatMessage]) -> str:
     """Extract session key from Tavus system message.
-    Tavus injects: 'Session: <conversation_id>'
-    We use the last 8 chars of the conversation_id to match what the frontend polls with.
+    Tavus injects the conversation_id somewhere in the system message.
+    We use the last 8 chars to match what the frontend polls with (conversation_id[-8:]).
     """
+    import re
     for msg in messages:
         if msg.role == "system":
+            # Look for a Tavus conversation ID pattern (c + hex string)
+            match = re.search(r'\b(c[0-9a-f]{15,})\b', msg.content)
+            if match:
+                return match.group(1)[-8:]
+            # Fallback: Session: line
             for line in msg.content.split("\n"):
                 line = line.strip()
                 if line.startswith("Session:"):
@@ -115,7 +121,7 @@ def extract_session_key(messages: list[ChatMessage]) -> str:
                     if len(val) >= 8:
                         return val[-8:]
                     elif val:
-                        return val  # return as-is if shorter than 8
+                        return val
     # Fallback: hash of messages
     return str(abs(hash(tuple(m.content for m in messages))))[-8:]
 
@@ -343,7 +349,16 @@ async def chat_completions(
     normalized_query = normalize_query(user_query, language)
     session_key     = extract_session_key(messages)
 
-    print(f"chat_completions: lang={language} session={session_key} query={user_query[:40]}", flush=True)
+    print(f"chat_completions: lang={language} session={session_key} query={normalized_query[:40]}", flush=True)
+
+    # Drop Tavus internal analysis messages entirely
+    if not normalized_query.strip() or "<user_audio_analysis>" in user_query or "The speaker sounds" in normalized_query:
+        print(f"Dropping internal Tavus message: {user_query[:60]}", flush=True)
+        async def empty_generate():
+            yield sse_chunk("", request.model, finish=True)
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(empty_generate(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     if normalized_query != user_query:
         print(f"normalized: {normalized_query[:60]}", flush=True)
 
