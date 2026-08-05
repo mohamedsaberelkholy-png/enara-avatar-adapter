@@ -264,7 +264,11 @@ async def chat_completions(
     # DEBUG — remove after diagnosis
     print(f"DEBUG full messages: {json.dumps([m.dict() for m in request.messages], ensure_ascii=False)}", flush=True)
 
-    messages = request.messages
+    # Strip Tavus's "respond in english" system message override
+    messages = [
+        m for m in request.messages
+        if not (m.role == "system" and m.content.strip().lower() == "respond in english")
+    ]
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
@@ -388,10 +392,12 @@ async def create_tavus_conversation(
                     pass
             asyncio.create_task(prewarm())
 
+            actual_id = uuid.uuid4().hex
             payload = {
                 "persona_id": pal_id,
                 "replica_id": TAVUS_REPLICA_ID,
-                "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}"
+                "conversation_name": f"Enara Tutor - {actual_id[:8]}",
+                "conversational_context": f"Session: {actual_id}"
             }
             print(f"DEBUG sending to Tavus: persona_id={pal_id} replica_id={TAVUS_REPLICA_ID} api_key={TAVUS_API_KEY[:8]}", flush=True)
 
@@ -408,7 +414,7 @@ async def create_tavus_conversation(
             data = resp.json()
             return {
                 "conversation_url": data["conversation_url"],
-                "conversation_id": data["conversation_id"]
+                "conversation_id": actual_id
             }
         except httpx.HTTPStatusError as e:
             raise HTTPException(
