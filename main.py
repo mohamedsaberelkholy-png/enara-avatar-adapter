@@ -100,9 +100,14 @@ def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
 
 async def generate_visual(question: str, answer: str, session_key: str):
     """Ask Claude Haiku if a visual is needed and generate it if so."""
+    print(f"[VISUAL] Starting generation for session_key={session_key}", flush=True)
+    
     if not ANTHROPIC_API_KEY:
-        print("generate_visual: ANTHROPIC_API_KEY not set, skipping", flush=True)
+        print(f"[VISUAL] ANTHROPIC_API_KEY not set, skipping", flush=True)
         return
+
+    print(f"[VISUAL] Question: {question[:60]}", flush=True)
+    print(f"[VISUAL] Answer: {answer[:60]}", flush=True)
 
     prompt = f"""You are a visual aid generator for an AI tutor.
 
@@ -119,6 +124,7 @@ Use a white background, clean fonts, teal (#0A5F6D) as accent color, max-width 1
 If no visual is needed: respond with exactly: NO_VISUAL"""
 
     try:
+        print(f"[VISUAL] Calling Claude API for session_key={session_key}", flush=True)
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -133,6 +139,7 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
                     "messages": [{"role": "user", "content": prompt}]
                 }
             )
+            print(f"[VISUAL] Claude API response status: {resp.status_code}", flush=True)
             resp.raise_for_status()
             data = resp.json()
             result = data["content"][0]["text"].strip()
@@ -143,15 +150,20 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
             if result.endswith("```"):
                 result = result.rsplit("```", 1)[0].strip()
 
-            print(f"generate_visual key={session_key}: {result[:80]}", flush=True)
+            print(f"[VISUAL] Claude response (first 100 chars): {result[:100]}", flush=True)
 
             if result != "NO_VISUAL" and "<" in result:
                 artifact_store[session_key] = {
                     "html": result,
                     "expires_at": time.time() + 120
                 }
+                print(f"[VISUAL] ✅ Stored visual for session_key={session_key}", flush=True)
+            else:
+                print(f"[VISUAL] ⏭️  No visual needed (response was: {result[:50]})", flush=True)
     except Exception as e:
-        print(f"Visual generation error: {e}", flush=True)
+        import traceback
+        print(f"[VISUAL] ❌ Error for session_key={session_key}: {e}", flush=True)
+        print(f"[VISUAL] Traceback: {traceback.format_exc()}", flush=True)
 
 
 def detect_language(text: str) -> str:
@@ -372,6 +384,7 @@ async def chat_completions(
                 return
 
         answer = data.get("answer", "")
+        print(f"[CHAT] Answer received, creating visual task for session_key={session_key}", flush=True)
         asyncio.create_task(generate_visual(user_query, answer, session_key))
 
         words = answer.split(" ")
