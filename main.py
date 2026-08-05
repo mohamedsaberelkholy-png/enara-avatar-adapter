@@ -183,22 +183,25 @@ def detect_language(text: str) -> str:
 
 def normalize_query(text: str, language: str) -> str:
     """Clean and normalize the query before sending to Enara."""
+    import re
+
     # Strip leading/trailing whitespace
     text = text.strip()
 
-    # Remove common Tavus STT artifacts (repeated punctuation, trailing noise)
-    import re
-    text = re.sub(r'\.{3,}', '.', text)       # multiple dots → single
+    # Remove Tavus internal tags (perception/audio analysis metadata)
+    text = re.sub(r'<[^>]+>', '', text).strip()
+
+    # Remove common Tavus STT artifacts
+    text = re.sub(r'\.{3,}', '.', text)        # multiple dots → single
     text = re.sub(r'\?{2,}', '?', text)        # multiple ? → single
-    text = re.sub(r'!{2,}', '!', text)          # multiple ! → single
+    text = re.sub(r'!{2,}', '!', text)         # multiple ! → single
     text = re.sub(r'\s{2,}', ' ', text)        # multiple spaces → single
 
     # If Franco-Arabic detected, append a hint for Enara to respond in Arabic
     if language == "arabic":
         text_lower = text.lower()
         franco_matches = set(text_lower.split()).intersection(FRANCO_ARABIC)
-        if franco_matches and not any(c for c in text if '\u0600' <= c <= '\u06FF'):
-            # Pure Franco-Arabic — add Arabic hint
+        if franco_matches and not any(c for c in text if '؀' <= c <= 'ۿ'):
             text = text + " [الرجاء الرد بالعربية]"
 
     return text
@@ -412,7 +415,7 @@ async def end_tavus_conversation(
 
 
 @app.post("/v1/tavus/conversation")
-async def create_tavus_conversation(_token: str = Depends(verify_token)):
+async def create_tavus_conversation(lang: str = "ar", _token: str = Depends(verify_token)):
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             pal_id = await get_or_create_pal(client)
@@ -424,12 +427,13 @@ async def create_tavus_conversation(_token: str = Depends(verify_token)):
                     pass
             asyncio.create_task(prewarm())
 
+            tavus_language = "Arabic" if lang == "ar" else "English"
             payload = {
                 "persona_id": pal_id,
                 "replica_id": TAVUS_REPLICA_ID,
                 "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}",
                 "properties": {
-                    "language": "Arabic"
+                    "language": tavus_language
                 }
             }
             print(f"DEBUG sending to Tavus: persona_id={pal_id} replica_id={TAVUS_REPLICA_ID} api_key={TAVUS_API_KEY[:8]}", flush=True)
