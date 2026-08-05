@@ -46,6 +46,7 @@ async def verify_token(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
 
+# Data Models
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -63,7 +64,7 @@ async def root():
 @app.post("/v1/tavus/conversation")
 async def create_tavus_conversation(authenticated: bool = Depends(verify_token)):
     """
-    Spawns a new Tavus Conversational AI video session.
+    Spawns a new Tavus Conversational AI video session configured for Arabic.
     """
     conversation_id = f"enara_sess_{uuid.uuid4().hex[:12]}"
     tavus_url = "https://tavusapi.com/v2/conversations"
@@ -73,9 +74,15 @@ async def create_tavus_conversation(authenticated: bool = Depends(verify_token))
         "Content-Type": "application/json"
     }
 
+    # Enhanced payload for Arabic speech & tutoring context
     payload = {
-        "conversational_context": f"Session: {conversation_id}\nRole: Enara AI Tutor",
-        "custom_greeting": "Hello! I am your Enara AI tutor. What would you like to focus on today?"
+        "conversational_context": (
+            f"Session ID: {conversation_id}\n"
+            "Role: Enara AI Tutor (معلم عنارة الذكي)\n"
+            "Language Instructions: You must speak and respond exclusively in natural fluent Arabic (اللغة العربية).\n"
+            "Tone: Warm, encouraging, concise, and educational."
+        ),
+        "custom_greeting": "مرحباً بك! أنا معلمك الذكي من منصة عنارة. كيف يمكنني مساعدتك في دراستك اليوم؟"
     }
 
     if TAVUS_PAL_ID:
@@ -137,6 +144,7 @@ async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
         "content-type": "application/json"
     }
 
+    # Verified Anthropic API model identifiers with fallbacks
     models_to_try = [
         "claude-3-5-haiku-20241022",
         "claude-3-5-sonnet-20241022",
