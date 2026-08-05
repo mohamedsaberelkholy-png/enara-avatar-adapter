@@ -18,13 +18,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration & Secrets
+# Environment Variables & Defaults
 ADAPTER_BEARER_TOKEN = os.getenv("ADAPTER_TOKEN", "EnaraAvatar2026!")
 TAVUS_API_KEY = os.getenv("TAVUS_API_KEY", "9813e2f240354329ae6d72f8d15170f9")
 TAVUS_PAL_ID = os.getenv("TAVUS_PAL_ID") or os.getenv("TAVUS_PERSONA_ID")
 TAVUS_REPLICA_ID = os.getenv("TAVUS_REPLICA_ID") or os.getenv("TAVUS_FACE_ID")
 
-# In-memory storage for visual artifacts generated during sessions
+# In-memory storage for generated visual artifacts during live sessions
 ARTIFACT_STORE = {}
 
 # Security Helper
@@ -38,7 +38,7 @@ async def verify_token(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
 
-# Pydantic Schemas
+# Data Models
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -57,11 +57,9 @@ async def root():
 async def create_tavus_conversation(authenticated: bool = Depends(verify_token)):
     """
     Spawns a new Tavus Conversational AI video session.
-    Ensures URL protocol is explicit (https://) to avoid UnsupportedProtocol errors.
+    Cleanly passes persona_id / replica_id without schema alias duplication errors.
     """
     conversation_id = f"enara_sess_{uuid.uuid4().hex[:12]}"
-
-    # Mandatory HTTPS protocol target URL
     tavus_url = "https://tavusapi.com/v2/conversations"
     
     headers = {
@@ -69,18 +67,18 @@ async def create_tavus_conversation(authenticated: bool = Depends(verify_token))
         "Content-Type": "application/json"
     }
 
-    # Prepare payload according to Tavus v2 specification
+    # Base payload
     payload = {
         "conversational_context": f"Session: {conversation_id}\nRole: Enara AI Tutor",
         "custom_greeting": "Hello! I am your Enara AI tutor. What would you like to focus on today?"
     }
 
+    # Pass persona_id exclusively (no pal_id duplicate)
     if TAVUS_PAL_ID:
-        payload["pal_id"] = TAVUS_PAL_ID
         payload["persona_id"] = TAVUS_PAL_ID
     
+    # Pass replica_id exclusively (no face_id duplicate)
     if TAVUS_REPLICA_ID:
-        payload["face_id"] = TAVUS_REPLICA_ID
         payload["replica_id"] = TAVUS_REPLICA_ID
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -96,19 +94,18 @@ async def create_tavus_conversation(authenticated: bool = Depends(verify_token))
 
             data = resp.json()
             
-            # Map Tavus output to Adapter Response
-            tavus_session_id = data.get("conversation_id", conversation_id)
-            conversation_url = data.get("conversation_url")
-
             return {
-                "conversation_id": tavus_session_id,
-                "conversation_url": conversation_url,
+                "conversation_id": data.get("conversation_id", conversation_id),
+                "conversation_url": data.get("conversation_url"),
                 "status": "active"
             }
 
         except httpx.RequestError as exc:
             print(f"[HTTPX ERROR] Request failed: {exc}")
-            raise HTTPException(status_code=500, detail=f"Failed to communicate with Tavus API: {str(exc)}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to communicate with Tavus API: {str(exc)}"
+            )
 
 # ---------------------------------------------------------------------------
 # 2. End / Delete Tavus Conversation Session
@@ -120,12 +117,10 @@ async def end_tavus_conversation(conversation_id: str, authenticated: bool = Dep
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            resp = await client.delete(tavus_url, headers=headers)
-            # Cleanup local artifacts stored under this key
+            await client.delete(tavus_url, headers=headers)
             ARTIFACT_STORE.pop(conversation_id, None)
             return {"status": "ended", "conversation_id": conversation_id}
         except Exception as e:
-            # Best-effort deletion
             return {"status": "ended", "note": str(e)}
 
 # ---------------------------------------------------------------------------
@@ -134,8 +129,7 @@ async def end_tavus_conversation(conversation_id: str, authenticated: bool = Dep
 @app.get("/v1/artifact/{session_key}")
 async def get_artifact(session_key: str):
     """
-    Endpoint polled by the LiveAvatarModal frontend to fetch 
-    visual artifacts generated during the ongoing session.
+    Polled by the LiveAvatarModal frontend to pull visual aids dynamically.
     """
     html_content = ARTIFACT_STORE.get(session_key)
     if html_content:
@@ -145,7 +139,7 @@ async def get_artifact(session_key: str):
 @app.post("/v1/artifact/{session_key}")
 async def set_artifact(session_key: str, request: Request, authenticated: bool = Depends(verify_token)):
     """
-    Endpoint called internally when Claude generates a visual artifact.
+    Called when Claude generates a new HTML visual artifact for the student.
     """
     body = await request.json()
     html_content = body.get("html")
