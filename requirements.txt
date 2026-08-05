@@ -2,4 +2,5 @@ fastapi
 uvicorn
 httpx
 pydantic
-python-multipart
+python-dotenv
+redis[asyncio]
