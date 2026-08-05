@@ -77,7 +77,9 @@ def extract_enara_context(messages: list[ChatMessage]) -> dict:
                 pass
             for line in msg.content.splitlines():
                 if line.strip().startswith("Session:"):
-                    ctx["conversation_id"] = line.split(":", 1)[1].strip()
+                    val = line.split(":", 1)[1].strip()
+                    if val:  # only override if non-empty
+                        ctx["conversation_id"] = val
     return ctx
 
 
@@ -147,8 +149,18 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
 
 def detect_language(text: str) -> str:
     """Detect if the message is Arabic or English."""
+    # Native Arabic script
     arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
-    return "arabic" if arabic_chars > len(text) * 0.15 else "english"
+    if arabic_chars > len(text) * 0.15:
+        return "arabic"
+    # Romanized Arabic common words (Tavus STT sometimes transcribes Arabic in Latin)
+    romanized_arabic = ["shrahli", "ayakur", "mamkint", "mafi", "yalla", "habibi",
+                        "inshallah", "wallah", "khalas", "tayeb", "enta", "enti",
+                        "mesh", "leish", "shu", "meen", "wein", "kifak", "sabah"]
+    lower = text.lower()
+    if any(word in lower for word in romanized_arabic):
+        return "arabic"
+    return "english"
 
 
 def extract_user_text(content: str) -> str:
