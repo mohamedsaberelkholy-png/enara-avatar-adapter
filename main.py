@@ -104,7 +104,7 @@ def extract_enara_context(messages: list[ChatMessage]) -> dict:
 def extract_session_key(messages: list[ChatMessage]) -> str:
     """Extract session key from Tavus system message.
     Tavus injects: 'Session: <conversation_id>'
-    We use the last 8 chars to match what the frontend polls with.
+    We use the last 8 chars of the conversation_id to match what the frontend polls with.
     """
     for msg in messages:
         if msg.role == "system":
@@ -112,8 +112,10 @@ def extract_session_key(messages: list[ChatMessage]) -> str:
                 line = line.strip()
                 if line.startswith("Session:"):
                     val = line.replace("Session:", "").strip()
-                    if val:
+                    if len(val) >= 8:
                         return val[-8:]
+                    elif val:
+                        return val  # return as-is if shorter than 8
     # Fallback: hash of messages
     return str(abs(hash(tuple(m.content for m in messages))))[-8:]
 
