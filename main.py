@@ -18,7 +18,6 @@ from typing import Optional
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warmup disabled — enable after OpenRouter credits are topped up
     yield
 
 app = FastAPI(title="Enara Avatar Adapter", lifespan=lifespan)
@@ -34,15 +33,17 @@ app.add_middleware(
 
 security = HTTPBearer()
 
-ENARA_BASE_URL   = os.environ["ENARA_BASE_URL"]
-ENARA_API_KEY    = os.environ["ENARA_API_KEY"]
-ADAPTER_TOKEN    = os.environ["ADAPTER_TOKEN"]
-TAVUS_API_KEY    = os.environ["TAVUS_API_KEY"]
-TAVUS_REPLICA_ID = os.environ["TAVUS_REPLICA_ID"]
+ENARA_BASE_URL    = os.environ["ENARA_BASE_URL"]
+ENARA_API_KEY     = os.environ["ENARA_API_KEY"]
+ADAPTER_TOKEN     = os.environ["ADAPTER_TOKEN"]
+TAVUS_API_KEY     = os.environ["TAVUS_API_KEY"]
+TAVUS_REPLICA_ID  = os.environ["TAVUS_REPLICA_ID"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# PAL ID — created once via /v2/pals and stored here.
-# If empty, the adapter will create one on first conversation request.
 TAVUS_PAL_ID = os.environ.get("TAVUS_PAL_ID", "p9892496020e")
+
+# In-memory store for visual artifacts
+artifact_store: dict = {}
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -65,14 +66,20 @@ class ChatCompletionRequest(BaseModel):
 
 
 def extract_enara_context(messages: list[ChatMessage]) -> dict:
+    ctx = {}
     for msg in messages:
         if msg.role == "system":
+            # Try JSON on the first line
             try:
                 first_line = msg.content.strip().split("\n")[0]
-                return json.loads(first_line)
+                ctx = json.loads(first_line)
             except (json.JSONDecodeError, IndexError):
                 pass
-    return {}
+            # Extract conversation_id injected by Tavus: "Session: <id>"
+            for line in msg.content.splitlines():
+                if line.strip().startswith("Session:"):
+                    ctx["conversation_id"] = line.split(":", 1)[1].strip()
+    return ctx
 
 
 def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
@@ -83,9 +90,10 @@ def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
     return history
 
 
-async def generate_visual(question: str, answer: str, conversation_id: str):
+async def generate_visual(question: str, answer: str, session_key: str):
     """Ask Claude Haiku if a visual is needed and generate it if so."""
     if not ANTHROPIC_API_KEY:
+        print("generate_visual: ANTHROPIC_API_KEY not set, skipping", flush=True)
         return
 
     prompt = f"""You are a visual aid generator for an AI tutor.
@@ -119,11 +127,12 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
             resp.raise_for_status()
             data = resp.json()
             result = data["content"][0]["text"].strip()
+            print(f"generate_visual key={session_key}: {result[:80]}", flush=True)
 
             if result != "NO_VISUAL" and "<" in result:
-                artifact_store[conversation_id] = {
+                artifact_store[session_key] = {
                     "html": result,
-                    "expires_at": time.time() + 60
+                    "expires_at": time.time() + 120
                 }
     except Exception as e:
         print(f"Visual generation error: {e}", flush=True)
@@ -131,8 +140,8 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
 
 def detect_language(text: str) -> str:
     """Detect if the message is Arabic or English."""
-    arabic_chars = sum(1 for c in text if '؀' <= c <= 'ۿ')
-    return "arabic" if arabic_chars > len(text) * 0.2 else "english"
+    arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+    return "arabic" if arabic_chars > len(text) * 0.15 else "english"
 
 
 def sse_chunk(content: str, model: str, finish: bool = False) -> str:
@@ -151,16 +160,11 @@ def sse_chunk(content: str, model: str, finish: bool = False) -> str:
 
 
 async def get_or_create_pal(client: httpx.AsyncClient) -> str:
-    """Returns the PAL ID to use for conversations.
-    If TAVUS_PAL_ID env var is set, use it directly.
-    Otherwise create a new PAL and return its ID.
-    """
     global TAVUS_PAL_ID
 
     if TAVUS_PAL_ID:
         return TAVUS_PAL_ID
 
-    # Create a new PAL with Enara as the custom LLM
     resp = await client.post(
         "https://tavusapi.com/v2/pals",
         headers={
@@ -173,7 +177,8 @@ async def get_or_create_pal(client: httpx.AsyncClient) -> str:
                 "You are Enara, an AI tutor helping students master their course material. "
                 "Guide students using the Socratic method — ask questions rather than just giving answers. "
                 "Keep responses short since they will be spoken aloud. "
-                "Respond in the same language the student uses, Arabic or English."
+                "Respond in the same language the student uses, Arabic or English.\n"
+                "Session: {conversation_id}"
             ),
             "pipeline_mode": "full",
             "default_face_id": TAVUS_REPLICA_ID,
@@ -195,7 +200,6 @@ async def get_or_create_pal(client: httpx.AsyncClient) -> str:
 @app.get("/v1/artifact/{session_key}")
 async def get_artifact(session_key: str):
     """Poll for a visual artifact. Returns html if available, null if not."""
-    # Clean expired artifacts
     now = time.time()
     expired = [k for k, v in artifact_store.items() if v["expires_at"] < now]
     for k in expired:
@@ -203,7 +207,7 @@ async def get_artifact(session_key: str):
 
     artifact = artifact_store.get(session_key)
     if artifact:
-        del artifact_store[session_key]  # consume it
+        del artifact_store[session_key]
         return {"html": artifact["html"], "session_key": session_key}
     return {"html": None, "session_key": session_key}
 
@@ -215,7 +219,6 @@ async def health():
 
 @app.get("/v1/tavus/credits")
 async def get_credits(_token: str = Depends(verify_token)):
-    """Returns remaining Tavus conversational credits."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.get(
@@ -253,6 +256,12 @@ async def chat_completions(
     teaching_method = request.teaching_method or ctx.get("teaching_method", "socratic")
 
     language = detect_language(user_query)
+    print(f"Detected language: {language} for query: {user_query[:50]}", flush=True)
+
+    # Derive session key — prefer conversation_id injected by Tavus via system prompt
+    conversation_id = ctx.get("conversation_id")
+    session_key = conversation_id[-8:] if conversation_id else str(abs(hash(tuple(m.content for m in messages))))[-8:]
+    print(f"Session key: {session_key} (from {'conversation_id' if conversation_id else 'hash'})", flush=True)
 
     enara_payload = {
         "course_id":       course_id,
@@ -290,9 +299,6 @@ async def chat_completions(
                 return
 
         answer = data.get("answer", "")
-
-        # Generate visual in background using a session key derived from message history
-        session_key = str(hash(tuple(m.content for m in request.messages)))[-8:]
         asyncio.create_task(generate_visual(user_query, answer, session_key))
 
         words = answer.split(" ")
@@ -318,7 +324,6 @@ async def end_tavus_conversation(
     conversation_id: str,
     _token: str = Depends(verify_token)
 ):
-    """Ends a Tavus conversation session to stop credit consumption."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.delete(
@@ -338,15 +343,17 @@ async def end_tavus_conversation(
 async def create_tavus_conversation(
     _token: str = Depends(verify_token)
 ):
-    """Creates a Tavus conversation session using a PAL and returns the embed URL."""
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             pal_id = await get_or_create_pal(client)
 
-            # Pre-warm Enara Modal backend in parallel while Tavus sets up
             async def prewarm():
                 try:
-                    await client.get(f"{ENARA_BASE_URL}/health", headers={"X-API-Key": ENARA_API_KEY}, timeout=5.0)
+                    await client.get(
+                        f"{ENARA_BASE_URL}/health",
+                        headers={"X-API-Key": ENARA_API_KEY},
+                        timeout=5.0
+                    )
                 except Exception:
                     pass
             asyncio.create_task(prewarm())
