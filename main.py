@@ -56,6 +56,17 @@ class ChatMessage(BaseModel):
     role: str
     content: str
 
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    request: ChatCompletionRequest,
+    _token: str = Depends(verify_token)
+):
+    # DEBUG — remove after diagnosis
+    print(f"DEBUG full messages: {json.dumps([m.dict() for m in request.messages], ensure_ascii=False)}", flush=True)
+    
+    messages = request.messages
+    if not messages:
+    # ... rest of function unchanged
 class ChatCompletionRequest(BaseModel):
     model: str = "enara-tutor"
     messages: list[ChatMessage]
