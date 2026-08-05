@@ -67,6 +67,7 @@ class ChatCompletionRequest(BaseModel):
 
 
 def extract_enara_context(messages: list[ChatMessage]) -> dict:
+    """Extract Enara context from system message, handling multiple Session lines correctly."""
     ctx = {}
     for msg in messages:
         if msg.role == "system":
@@ -75,11 +76,17 @@ def extract_enara_context(messages: list[ChatMessage]) -> dict:
                 ctx = json.loads(first_line)
             except (json.JSONDecodeError, IndexError):
                 pass
-            for line in msg.content.splitlines():
+            # Process Session lines in REVERSE order so the last (filled) one wins
+            # This handles Tavus sending: "Session: \nSession: test-session-abc123"
+            session_val = None
+            for line in reversed(msg.content.splitlines()):
                 if line.strip().startswith("Session:"):
                     val = line.split(":", 1)[1].strip()
-                    if val:  # only override if non-empty
-                        ctx["conversation_id"] = val
+                    if val:  # Found a non-empty Session value
+                        session_val = val
+                        break
+            if session_val:
+                ctx["conversation_id"] = session_val
     return ctx
 
 
@@ -148,18 +155,38 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
 
 
 def detect_language(text: str) -> str:
-    """Detect if the message is Arabic or English."""
-    # Native Arabic script
+    """Detect if the message is Arabic or English, including romanized Arabic."""
+    # Native Arabic script (U+0600 to U+06FF)
     arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
     if arabic_chars > len(text) * 0.15:
         return "arabic"
-    # Romanized Arabic common words (Tavus STT sometimes transcribes Arabic in Latin)
-    romanized_arabic = ["shrahli", "ayakur", "mamkint", "mafi", "yalla", "habibi",
-                        "inshallah", "wallah", "khalas", "tayeb", "enta", "enti",
-                        "mesh", "leish", "shu", "meen", "wein", "kifak", "sabah"]
+    
+    # Romanized Arabic common words and phrases
+    # Includes Levantine, Egyptian, Gulf dialects in Latin script
+    romanized_arabic = [
+        # Common greetings and pleasantries
+        "marhaba", "assalamu", "salaam", "wa alaikum", "walaikum",
+        "sabah", "masaa", "allo", "kayf", "ahlak", "ahlan",
+        
+        # Common words
+        "ayakur", "mamkint", "mafi", "yalla", "habibi", "habibti",
+        "inshallah", "wallah", "khalas", "tayeb", "tamam", "kwayyes",
+        "enta", "enti", "entom", "mesh", "leish", "shu", "shno",
+        "meen", "wein", "wayn", "kifak", "tammam", "zain",
+        
+        # Verbs and conjugations
+        "akher", "ashtar", "qal", "qalit", "amalt", "saraffon",
+        
+        # Common phrases
+        "kateer", "shwayya", "fikir", "galeb", "akher shey", "yalah",
+        "al hamdu", "subhan", "la hawla", "bismallah", "noor allah"
+    ]
+    
     lower = text.lower()
+    # Check if any romanized word appears in the text
     if any(word in lower for word in romanized_arabic):
         return "arabic"
+    
     return "english"
 
 
