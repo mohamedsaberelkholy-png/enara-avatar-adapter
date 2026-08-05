@@ -428,7 +428,9 @@ async def create_tavus_conversation(_token: str = Depends(verify_token)):
                 "persona_id": pal_id,
                 "replica_id": TAVUS_REPLICA_ID,
                 "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}",
-                "properties": {"language": "multilingual"}
+                "properties": {
+                    "language": "Arabic"
+                }
             }
             print(f"DEBUG sending to Tavus: persona_id={pal_id} replica_id={TAVUS_REPLICA_ID} api_key={TAVUS_API_KEY[:8]}", flush=True)
 
