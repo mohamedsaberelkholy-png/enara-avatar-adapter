@@ -1,7 +1,7 @@
 import os
 import uuid
 import httpx
-from typing import Optional, List  # <-- FIXED: Explicitly importing Optional and List
+from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -58,7 +58,62 @@ async def root():
     return {"status": "ok", "service": "Enara Avatar Adapter Production"}
 
 # ---------------------------------------------------------------------------
-# Helper: Call Anthropic Claude safely (Haiku 3.5 / Sonnet 3.5)
+# 2. Tavus Session Management Endpoints (POST & DELETE)
+# ---------------------------------------------------------------------------
+@app.post("/v1/tavus/conversation")
+async def create_tavus_conversation(authenticated: bool = Depends(verify_token)):
+    """
+    Spawns a new Tavus Conversational AI video session.
+    """
+    conversation_id = f"enara_sess_{uuid.uuid4().hex[:12]}"
+    tavus_url = "https://tavusapi.com/v2/conversations"
+    
+    headers = {
+        "x-api-key": TAVUS_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "conversational_context": f"Session: {conversation_id}\nRole: Enara AI Tutor",
+        "custom_greeting": "Hello! I am your Enara AI tutor. What would you like to focus on today?"
+    }
+
+    if TAVUS_PAL_ID:
+        payload["persona_id"] = TAVUS_PAL_ID
+    if TAVUS_REPLICA_ID:
+        payload["replica_id"] = TAVUS_REPLICA_ID
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await client.post(tavus_url, headers=headers, json=payload)
+            if resp.status_code not in (200, 201):
+                print(f"[TAVUS ERROR] Status {resp.status_code}: {resp.text}")
+                raise HTTPException(status_code=resp.status_code, detail=f"Tavus API Error: {resp.text}")
+            
+            data = resp.json()
+            return {
+                "conversation_id": data.get("conversation_id", conversation_id),
+                "conversation_url": data.get("conversation_url"),
+                "status": "active"
+            }
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to communicate with Tavus API: {str(exc)}")
+
+@app.delete("/v1/tavus/conversation/{conversation_id}")
+async def end_tavus_conversation(conversation_id: str, authenticated: bool = Depends(verify_token)):
+    tavus_url = f"https://tavusapi.com/v2/conversations/{conversation_id}"
+    headers = {"x-api-key": TAVUS_API_KEY}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            await client.delete(tavus_url, headers=headers)
+            ARTIFACT_STORE.pop(conversation_id, None)
+            return {"status": "ended", "conversation_id": conversation_id}
+        except Exception as e:
+            return {"status": "ended", "note": str(e)}
+
+# ---------------------------------------------------------------------------
+# 3. Helper: Call Anthropic Claude safely for HTML Visual Cards
 # ---------------------------------------------------------------------------
 async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
     if not ANTHROPIC_API_KEY:
@@ -118,12 +173,21 @@ async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
     return None
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# 4. Artifact & Text Chat Endpoints
 # ---------------------------------------------------------------------------
 @app.get("/v1/artifact/{session_key}")
 async def get_artifact(session_key: str):
     html_content = ARTIFACT_STORE.get(session_key)
     return {"html": html_content}
+
+@app.post("/v1/artifact/{session_key}")
+async def set_artifact(session_key: str, request: Request, authenticated: bool = Depends(verify_token)):
+    body = await request.json()
+    html_content = body.get("html")
+    if html_content:
+        ARTIFACT_STORE[session_key] = html_content
+        return {"status": "stored", "session_key": session_key}
+    raise HTTPException(status_code=400, detail="Missing HTML payload")
 
 @app.post("/v1/chat/completions")
 async def text_chat_completion(
@@ -164,7 +228,9 @@ async def text_chat_completion(
             content={"error": "Internal server error", "detail": str(err)}
         )
 
-# Bind dynamically to Railway's $PORT
+# ---------------------------------------------------------------------------
+# Dynamic Port Binding for Railway
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
