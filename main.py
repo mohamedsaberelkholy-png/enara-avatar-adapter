@@ -420,15 +420,35 @@ async def get_artifact(session_key: str):
     return {"html": None, "session_key": session_key}
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(
-    request: ChatCompletionRequest,
-    _token: str = Depends(verify_token),
-):
-    messages = request.messages
-    if not messages:
-        raise HTTPException(status_code=400, detail="No messages provided")
+@app.post("/v1/tavus/conversation")
+async def create_tavus_conversation(_token: str = Depends(verify_token)):
+    # No lang param — always Arabic STT for best bilingual transcription
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            pal_id = await get_or_create_pal(client)
+            asyncio.create_task(prewarm_modal())
 
+            payload = {
+                "persona_id": pal_id,
+                "replica_id": TAVUS_REPLICA_ID,
+                "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}",
+                "properties": {"language": "Arabic"}  # STT hint only — not response language
+            }
+
+            resp = await client.post(
+                "https://tavusapi.com/v2/conversations",
+                headers={"x-api-key": TAVUS_API_KEY, "Content-Type": "application/json"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # No Redis pin — resolve_language() detects per message
+            return {
+                "conversation_url": data["conversation_url"],
+                "conversation_id": data["conversation_id"],
+            }
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"Tavus API error: {e.response.status_code} - {e.response.text}")
     user_query = next(
         (m.content for m in reversed(messages) if m.role == "user"), None
     )
