@@ -111,7 +111,7 @@ Use a white background, clean fonts, teal (#0A5F6D) as accent color, max-width 1
 If no visual is needed: respond with exactly: NO_VISUAL"""
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
@@ -227,7 +227,7 @@ async def health():
 
 @app.get("/v1/tavus/credits")
 async def get_credits(_token: str = Depends(verify_token)):
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         try:
             resp = await client.get(
                 "https://tavusapi.com/v2/credits",
@@ -281,7 +281,7 @@ async def chat_completions(
     }
 
     async def generate():
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             try:
                 resp = await client.post(
                     f"{ENARA_BASE_URL}/chat/query",
@@ -332,7 +332,7 @@ async def end_tavus_conversation(
     conversation_id: str,
     _token: str = Depends(verify_token)
 ):
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         try:
             resp = await client.delete(
                 f"https://tavusapi.com/v2/conversations/{conversation_id}",
