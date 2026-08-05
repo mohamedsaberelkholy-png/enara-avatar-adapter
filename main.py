@@ -8,6 +8,7 @@ import uuid
 import httpx
 import os
 import asyncio
+import redis.asyncio as aioredis
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,9 +24,9 @@ TAVUS_API_KEY    = os.environ["TAVUS_API_KEY"]
 TAVUS_REPLICA_ID = os.environ["TAVUS_REPLICA_ID"]
 TAVUS_PAL_ID     = os.environ.get("TAVUS_PAL_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+REDIS_URL = os.environ.get("REDIS_URL", "")
 
-# In-memory artifact store: session_key -> {html, expires_at}
-artifact_store: dict = {}
+redis_client: aioredis.Redis | None = None
 
 
 async def warmup_modal():
@@ -46,8 +47,13 @@ async def warmup_modal():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global redis_client
+    if REDIS_URL:
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
     asyncio.create_task(warmup_modal())
     yield
+    if redis_client:
+        await redis_client.aclose()
 
 
 app = FastAPI(title="Enara Avatar Adapter", lifespan=lifespan)
@@ -181,10 +187,9 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
             print(f"generate_visual key={session_key}: {result[:80]}", flush=True)
 
             if result != "NO_VISUAL" and "<" in result:
-                artifact_store[session_key] = {
-                    "html": result,
-                    "expires_at": time.time() + 60
-                }
+                if redis_client:
+                    await redis_client.setex(f"artifact:{session_key}", 120, result)
+                    print(f"Visual stored in Redis key=artifact:{session_key}", flush=True)
     except Exception as e:
         print(f"Visual generation error: {e}", flush=True)
 
@@ -226,15 +231,11 @@ async def get_or_create_pal(client: httpx.AsyncClient) -> str:
 @app.get("/v1/artifact/{session_key}")
 async def get_artifact(session_key: str):
     """Poll for a visual artifact. Returns html if available, null if not."""
-    now = time.time()
-    expired = [k for k, v in artifact_store.items() if v["expires_at"] < now]
-    for k in expired:
-        del artifact_store[k]
-
-    artifact = artifact_store.get(session_key)
-    if artifact:
-        del artifact_store[session_key]
-        return {"html": artifact["html"], "session_key": session_key}
+    if redis_client:
+        html = await redis_client.get(f"artifact:{session_key}")
+        if html:
+            await redis_client.delete(f"artifact:{session_key}")
+            return {"html": html, "session_key": session_key}
     return {"html": None, "session_key": session_key}
 
 
@@ -370,4 +371,3 @@ async def create_tavus_conversation(_token: str = Depends(verify_token)):
             }
         except httpx.HTTPStatusError as e:
             raise HTTPException(status_code=502, detail=f"Tavus API error: {e.response.status_code} - {e.response.text}")
-    
