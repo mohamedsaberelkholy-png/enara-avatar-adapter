@@ -56,17 +56,7 @@ class ChatMessage(BaseModel):
     role: str
     content: str
 
-@app.post("/v1/chat/completions")
-async def chat_completions(
-    request: ChatCompletionRequest,
-    _token: str = Depends(verify_token)
-):
-    # DEBUG — remove after diagnosis
-    print(f"DEBUG full messages: {json.dumps([m.dict() for m in request.messages], ensure_ascii=False)}", flush=True)
-    
-    messages = request.messages
-    if not messages:
-    # ... rest of function unchanged
+
 class ChatCompletionRequest(BaseModel):
     model: str = "enara-tutor"
     messages: list[ChatMessage]
@@ -80,13 +70,11 @@ def extract_enara_context(messages: list[ChatMessage]) -> dict:
     ctx = {}
     for msg in messages:
         if msg.role == "system":
-            # Try JSON on the first line
             try:
                 first_line = msg.content.strip().split("\n")[0]
                 ctx = json.loads(first_line)
             except (json.JSONDecodeError, IndexError):
                 pass
-            # Extract conversation_id injected by Tavus: "Session: <id>"
             for line in msg.content.splitlines():
                 if line.strip().startswith("Session:"):
                     ctx["conversation_id"] = line.split(":", 1)[1].strip()
@@ -122,7 +110,7 @@ Use a white background, clean fonts, teal (#0A5F6D) as accent color, max-width 1
 If no visual is needed: respond with exactly: NO_VISUAL"""
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
@@ -140,7 +128,7 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
             data = resp.json()
             result = data["content"][0]["text"].strip()
 
-            # ✅ Strip markdown fences if Haiku wraps the HTML
+            # Strip markdown fences if Haiku wraps the HTML
             if result.startswith("```"):
                 result = result.split("\n", 1)[1] if "\n" in result else ""
             if result.endswith("```"):
@@ -161,6 +149,21 @@ def detect_language(text: str) -> str:
     """Detect if the message is Arabic or English."""
     arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
     return "arabic" if arabic_chars > len(text) * 0.15 else "english"
+
+
+def extract_user_text(content: str) -> str:
+    """Extract actual user text, stripping Tavus audio analysis metadata."""
+    # Tavus sometimes wraps the transcript in <user_audio_analysis> tags
+    # The actual transcript comes after the closing tag
+    if "<user_audio_analysis>" in content:
+        # Try to get text after the closing tag
+        parts = content.split("</user_audio_analysis>")
+        if len(parts) > 1:
+            return parts[1].strip()
+        # If no closing tag, strip everything inside angle brackets
+        import re
+        return re.sub(r"<[^>]+>.*?(?:</[^>]+>|$)", "", content, flags=re.DOTALL).strip()
+    return content.strip()
 
 
 def sse_chunk(content: str, model: str, finish: bool = False) -> str:
@@ -238,7 +241,7 @@ async def health():
 
 @app.get("/v1/tavus/credits")
 async def get_credits(_token: str = Depends(verify_token)):
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.get(
                 "https://tavusapi.com/v2/credits",
@@ -258,16 +261,24 @@ async def chat_completions(
     request: ChatCompletionRequest,
     _token: str = Depends(verify_token)
 ):
+    # DEBUG — remove after diagnosis
+    print(f"DEBUG full messages: {json.dumps([m.dict() for m in request.messages], ensure_ascii=False)}", flush=True)
+
     messages = request.messages
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
-    user_query = next(
+    # Extract and clean the user query — strip Tavus audio analysis metadata
+    raw_user_query = next(
         (m.content for m in reversed(messages) if m.role == "user"),
         None
     )
-    if not user_query:
+    if not raw_user_query:
         raise HTTPException(status_code=400, detail="No user message found")
+
+    user_query = extract_user_text(raw_user_query)
+    if not user_query:
+        user_query = raw_user_query  # fallback to raw if extraction yields nothing
 
     ctx = extract_enara_context(messages)
     course_id       = request.course_id       or ctx.get("course_id", "336627af-732e-4349-bda8-b73c702dcf42")
@@ -275,9 +286,9 @@ async def chat_completions(
     teaching_method = request.teaching_method or ctx.get("teaching_method", "socratic")
 
     language = detect_language(user_query)
-    print(f"Detected language: {language} for query: {user_query[:50]}", flush=True)
+    print(f"Detected language: {language} for query: {user_query[:80]}", flush=True)
 
-    # ✅ Use full conversation_id as session key (no slicing)
+    # Use full conversation_id as session key so frontend polling matches
     conversation_id = ctx.get("conversation_id")
     session_key = conversation_id if conversation_id else str(abs(hash(tuple(m.content for m in messages))))[-8:]
     print(f"Session key: {session_key} (from {'conversation_id' if conversation_id else 'hash'})", flush=True)
@@ -292,7 +303,7 @@ async def chat_completions(
     }
 
     async def generate():
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             try:
                 resp = await client.post(
                     f"{ENARA_BASE_URL}/chat/query",
@@ -343,7 +354,7 @@ async def end_tavus_conversation(
     conversation_id: str,
     _token: str = Depends(verify_token)
 ):
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.delete(
                 f"https://tavusapi.com/v2/conversations/{conversation_id}",
@@ -397,7 +408,6 @@ async def create_tavus_conversation(
             data = resp.json()
             return {
                 "conversation_url": data["conversation_url"],
-                # ✅ Return full conversation_id, no slicing
                 "conversation_id": data["conversation_id"]
             }
         except httpx.HTTPStatusError as e:
