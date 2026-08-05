@@ -9,14 +9,20 @@ from typing import Optional, List
 
 app = FastAPI(title="Enara Avatar Adapter", version="1.0.0")
 
-# Enable CORS for React Frontend
+# 1. FIX CORS: Set explicit wildcard policy for all methods & headers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_credentials=False,  # Set to False when using wildcard origins
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
+
+# Catch-all OPTIONS route to satisfy browser preflight checks explicitly
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    return JSONResponse(status_code=200, content={"status": "ok"})
 
 # Environment Variables & Secrets
 ADAPTER_BEARER_TOKEN = os.getenv("ADAPTER_TOKEN", "EnaraAvatar2026!")
@@ -55,10 +61,6 @@ async def root():
 # Helper: Generate HTML Visual Card with Claude
 # ---------------------------------------------------------------------------
 async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
-    """
-    Calls Anthropic Claude API to generate self-contained, beautifully styled HTML/CSS
-    visual cards (RTL Arabic supported) for the student's learning session.
-    """
     if not ANTHROPIC_API_KEY:
         print("[WARNING] ANTHROPIC_API_KEY is not set. Skipping Claude artifact generation.")
         return None
@@ -68,10 +70,10 @@ async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
     Your job is to generate self-contained, modern, beautiful HTML visual aids to help students learn.
     
     RULES:
-    1. Output strictly ONLY the raw HTML content inside <div> tags (no ```html code fences, no extra conversational text).
-    2. Support Arabic RTL (Right-to-Left) direction if the prompt is in Arabic (direction: rtl; text-align: right;).
+    1. Output strictly ONLY raw HTML content inside <div> tags (no ```html code fences, no extra conversational text).
+    2. Support Arabic RTL (Right-to-Left) direction if prompt is in Arabic (direction: rtl; text-align: right;).
     3. Use clean inline CSS with modern UI cards, clear headers, icons/emojis, and bullet points.
-    4. Make the design modern, responsive, readable, and visually appealing for high school & college students.
+    4. Make the design modern, responsive, readable, and visually appealing.
     """
 
     headers = {
@@ -85,7 +87,7 @@ async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
         "max_tokens": 1500,
         "system": system_prompt,
         "messages": [
-            {"role": "user", "content": f"Create an interactive/visual educational card for this topic: {user_prompt}"}
+            {"role": "user", "content": f"Create an educational visual card for this topic: {user_prompt}"}
         ]
     }
 
@@ -95,6 +97,113 @@ async def generate_claude_visual_artifact(user_prompt: str) -> Optional[str]:
             if resp.status_code == 200:
                 data = resp.json()
                 html_code = data["content"][0]["text"].strip()
-                # Clean up fences if returned
                 if html_code.startswith("```html"):
-                    html_code = html_code.replace("```html", "").replace("
+                    html_code = html_code.replace("```html", "").replace("```", "").strip()
+                return html_code
+            else:
+                print(f"[CLAUDE ERROR] Status: {resp.status_code}, Response: {resp.text}")
+                return None
+        except Exception as e:
+            print(f"[CLAUDE EXCEPTION] {e}")
+            return None
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.post("/v1/tavus/conversation")
+async def create_tavus_conversation(authenticated: bool = Depends(verify_token)):
+    conversation_id = f"enara_sess_{uuid.uuid4().hex[:12]}"
+    tavus_url = "https://tavusapi.com/v2/conversations"
+    
+    headers = {
+        "x-api-key": TAVUS_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "conversational_context": f"Session: {conversation_id}\nRole: Enara AI Tutor",
+        "custom_greeting": "Hello! I am your Enara AI tutor. What would you like to focus on today?"
+    }
+
+    if TAVUS_PAL_ID:
+        payload["persona_id"] = TAVUS_PAL_ID
+    if TAVUS_REPLICA_ID:
+        payload["replica_id"] = TAVUS_REPLICA_ID
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await client.post(tavus_url, headers=headers, json=payload)
+            if resp.status_code not in (200, 201):
+                raise HTTPException(status_code=resp.status_code, detail=f"Tavus API Error: {resp.text}")
+            data = resp.json()
+            return {
+                "conversation_id": data.get("conversation_id", conversation_id),
+                "conversation_url": data.get("conversation_url"),
+                "status": "active"
+            }
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to communicate with Tavus API: {str(exc)}")
+
+@app.delete("/v1/tavus/conversation/{conversation_id}")
+async def end_tavus_conversation(conversation_id: str, authenticated: bool = Depends(verify_token)):
+    tavus_url = f"https://tavusapi.com/v2/conversations/{conversation_id}"
+    headers = {"x-api-key": TAVUS_API_KEY}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            await client.delete(tavus_url, headers=headers)
+            ARTIFACT_STORE.pop(conversation_id, None)
+            return {"status": "ended", "conversation_id": conversation_id}
+        except Exception as e:
+            return {"status": "ended", "note": str(e)}
+
+@app.get("/v1/artifact/{session_key}")
+async def get_artifact(session_key: str):
+    html_content = ARTIFACT_STORE.get(session_key)
+    if html_content:
+        return {"html": html_content}
+    return {"html": None}
+
+@app.post("/v1/artifact/{session_key}")
+async def set_artifact(session_key: str, request: Request, authenticated: bool = Depends(verify_token)):
+    body = await request.json()
+    html_content = body.get("html")
+    if html_content:
+        ARTIFACT_STORE[session_key] = html_content
+        return {"status": "stored", "session_key": session_key}
+    raise HTTPException(status_code=400, detail="Missing HTML payload")
+
+@app.post("/v1/chat/completions")
+async def text_chat_completion(
+    request: TavusChatRequest,
+    authenticated: bool = Depends(verify_token)
+):
+    user_message = request.messages[-1].content if request.messages else ""
+    session_key = f"text_sess_{uuid.uuid4().hex[:8]}"
+
+    html_artifact = await generate_claude_visual_artifact(user_message)
+
+    if html_artifact:
+        ARTIFACT_STORE[session_key] = html_artifact
+        reply_text = f"لقد قمت بإنشاء لوحة توضيحية لك بناءً على سؤالك: '{user_message}'"
+    else:
+        reply_text = f"تم استلام طلبك: '{user_message}'"
+
+    return {
+        "id": session_key,
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": reply_text
+                }
+            }
+        ],
+        "artifact_key": session_key if session_key in ARTIFACT_STORE else None
+    }
+
+# 2. FIX 502 BAD GATEWAY: Dynamically read PORT assigned by Railway
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
