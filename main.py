@@ -40,7 +40,7 @@ TAVUS_API_KEY     = os.environ["TAVUS_API_KEY"]
 TAVUS_REPLICA_ID  = os.environ["TAVUS_REPLICA_ID"]
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-TAVUS_PAL_ID = os.environ.get("TAVUS_PAL_ID", "p9892496020e")
+TAVUS_PAL_ID = os.environ.get("TAVUS_PAL_ID", "p679b746586b")
 
 # In-memory store for visual artifacts
 artifact_store: dict = {}
@@ -106,6 +106,7 @@ comparisons, timelines, vocabulary lists, step-by-step processes).
 Simple conversational exchanges do NOT need visuals.
 
 If a visual would help: respond with ONLY a clean, self-contained HTML snippet using inline styles.
+No markdown fences, no explanation, just raw HTML starting with <div or <table.
 Use a white background, clean fonts, teal (#0A5F6D) as accent color, max-width 100%.
 If no visual is needed: respond with exactly: NO_VISUAL"""
 
@@ -127,6 +128,13 @@ If no visual is needed: respond with exactly: NO_VISUAL"""
             resp.raise_for_status()
             data = resp.json()
             result = data["content"][0]["text"].strip()
+
+            # ✅ Strip markdown fences if Haiku wraps the HTML
+            if result.startswith("```"):
+                result = result.split("\n", 1)[1] if "\n" in result else ""
+            if result.endswith("```"):
+                result = result.rsplit("```", 1)[0].strip()
+
             print(f"generate_visual key={session_key}: {result[:80]}", flush=True)
 
             if result != "NO_VISUAL" and "<" in result:
@@ -197,7 +205,7 @@ async def get_or_create_pal(client: httpx.AsyncClient) -> str:
     return TAVUS_PAL_ID
 
 
-@app.get("/v1/artifact/{session_key}")
+@app.get("/v1/artifact/{session_key:path}")
 async def get_artifact(session_key: str):
     """Poll for a visual artifact. Returns html if available, null if not."""
     now = time.time()
@@ -258,9 +266,9 @@ async def chat_completions(
     language = detect_language(user_query)
     print(f"Detected language: {language} for query: {user_query[:50]}", flush=True)
 
-    # Derive session key — prefer conversation_id injected by Tavus via system prompt
+    # ✅ Use full conversation_id as session key (no slicing)
     conversation_id = ctx.get("conversation_id")
-    session_key = conversation_id[-8:] if conversation_id else str(abs(hash(tuple(m.content for m in messages))))[-8:]
+    session_key = conversation_id if conversation_id else str(abs(hash(tuple(m.content for m in messages))))[-8:]
     print(f"Session key: {session_key} (from {'conversation_id' if conversation_id else 'hash'})", flush=True)
 
     enara_payload = {
@@ -378,6 +386,7 @@ async def create_tavus_conversation(
             data = resp.json()
             return {
                 "conversation_url": data["conversation_url"],
+                # ✅ Return full conversation_id, no slicing
                 "conversation_id": data["conversation_id"]
             }
         except httpx.HTTPStatusError as e:
