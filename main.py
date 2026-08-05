@@ -275,6 +275,14 @@ async def create_tavus_conversation(
         try:
             pal_id = await get_or_create_pal(client)
 
+            # Pre-warm Enara Modal backend in parallel while Tavus sets up
+            async def prewarm():
+                try:
+                    await client.get(f"{ENARA_BASE_URL}/health", headers={"X-API-Key": ENARA_API_KEY}, timeout=5.0)
+                except Exception:
+                    pass
+            asyncio.create_task(prewarm())
+
             payload = {
                 "persona_id": pal_id,
                 "replica_id": TAVUS_REPLICA_ID,
