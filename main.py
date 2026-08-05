@@ -16,24 +16,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
 
-async def warmup_modal():
-    """Ping Enara Modal backend every 4 minutes to prevent cold starts."""
-    await asyncio.sleep(10)  # wait for startup
-    while True:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.get(
-                    f"{ENARA_BASE_URL}/health",
-                    headers={"X-API-Key": ENARA_API_KEY},
-                )
-        except Exception:
-            pass  # ignore errors — this is best-effort warming
-        await asyncio.sleep(240)  # ping every 4 minutes
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(warmup_modal())
+    # Warmup disabled — enable after OpenRouter credits are topped up
     yield
 
 app = FastAPI(title="Enara Avatar Adapter", lifespan=lifespan)
