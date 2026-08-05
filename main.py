@@ -128,10 +128,80 @@ def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
     return history
 
 
+# Franco-Arabic words commonly used by Egyptian/Arab students
+FRANCO_ARABIC = {
+    "ana", "enta", "enti", "mesh", "msh", "fe", "fi", "3andi", "3ndi",
+    "leih", "leh", "ezay", "bas", "ya3ni", "ya3ny", "keda", "kida",
+    "zay", "law", "meen", "fein", "fyn", "el", "al", "wala", "walla",
+    "aho", "taman", "tamam", "mafish", "mafesh", "mumkin", "momken",
+    "3alshan", "3shan", "tayeb", "tayyeb", "yalla", "khalas", "خلاص",
+    "momkn", "lazim", "laazim", "aayiz", "3ayiz", "mish", "miش"
+}
+
+# Explicit Arabic request phrases in English
+ARABIC_REQUEST_PHRASES = [
+    "in arabic", "explain in arabic", "respond in arabic",
+    "answer in arabic", "باللغة العربية", "بالعربي", "بالعربية",
+    "translate to arabic", "say it in arabic", "tell me in arabic"
+]
+
+# Explicit English request phrases
+ENGLISH_REQUEST_PHRASES = [
+    "in english", "explain in english", "respond in english",
+    "answer in english", "بالانجليزي", "بالإنجليزية", "بالانجليزية",
+    "translate to english", "say it in english", "tell me in english"
+]
+
+
 def detect_language(text: str) -> str:
-    """Detect if the message is Arabic or English."""
-    arabic_count = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
-    return "arabic" if arabic_count > len(text) * 0.15 else "english"
+    """Detect if the message is Arabic or English using multiple signals."""
+    text_lower = text.lower().strip()
+
+    # 1. Explicit language request — highest priority
+    for phrase in ARABIC_REQUEST_PHRASES:
+        if phrase in text_lower:
+            return "arabic"
+    for phrase in ENGLISH_REQUEST_PHRASES:
+        if phrase in text_lower:
+            return "english"
+
+    # 2. Arabic script characters
+    arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+    if arabic_chars > len(text) * 0.15:
+        return "arabic"
+
+    # 3. Franco-Arabic word detection
+    words = set(text_lower.split())
+    franco_matches = words.intersection(FRANCO_ARABIC)
+    if len(franco_matches) >= 2:
+        return "arabic"
+    if len(franco_matches) == 1 and len(words) <= 6:
+        return "arabic"
+
+    return "english"
+
+
+def normalize_query(text: str, language: str) -> str:
+    """Clean and normalize the query before sending to Enara."""
+    # Strip leading/trailing whitespace
+    text = text.strip()
+
+    # Remove common Tavus STT artifacts (repeated punctuation, trailing noise)
+    import re
+    text = re.sub(r'\.{3,}', '.', text)       # multiple dots → single
+    text = re.sub(r'\?{2,}', '?', text)        # multiple ? → single
+    text = re.sub(r'!{2,}', '!', text)          # multiple ! → single
+    text = re.sub(r'\s{2,}', ' ', text)        # multiple spaces → single
+
+    # If Franco-Arabic detected, append a hint for Enara to respond in Arabic
+    if language == "arabic":
+        text_lower = text.lower()
+        franco_matches = set(text_lower.split()).intersection(FRANCO_ARABIC)
+        if franco_matches and not any(c for c in text if '\u0600' <= c <= '\u06FF'):
+            # Pure Franco-Arabic — add Arabic hint
+            text = text + " [الرجاء الرد بالعربية]"
+
+    return text
 
 
 def sse_chunk(content: str, model: str, finish: bool = False) -> str:
@@ -267,13 +337,16 @@ async def chat_completions(
     section_ids     = request.section_ids     or ctx.get("section_ids", [])
     teaching_method = request.teaching_method or ctx.get("teaching_method", "socratic")
     language        = detect_language(user_query)
+    normalized_query = normalize_query(user_query, language)
     session_key     = extract_session_key(messages)
 
     print(f"chat_completions: lang={language} session={session_key} query={user_query[:40]}", flush=True)
+    if normalized_query != user_query:
+        print(f"normalized: {normalized_query[:60]}", flush=True)
 
     enara_payload = {
         "course_id":       course_id,
-        "query":           user_query,
+        "query":           normalized_query,
         "section_ids":     section_ids,
         "teaching_method": teaching_method,
         "chat_history":    build_chat_history(messages),
@@ -304,7 +377,7 @@ async def chat_completions(
                 return
 
         answer = data.get("answer", "")
-        asyncio.create_task(generate_visual(user_query, answer, session_key))
+        asyncio.create_task(generate_visual(normalized_query, answer, session_key))
 
         words = answer.split(" ")
         for i, word in enumerate(words):
