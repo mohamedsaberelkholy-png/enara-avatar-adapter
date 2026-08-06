@@ -143,15 +143,18 @@ def extract_enara_context(messages: list[ChatMessage]) -> dict:
 def extract_session_key(messages: list[ChatMessage]) -> str:
     for msg in messages:
         if msg.role == "system":
+            # Try to find a Tavus conversation ID (starts with c + 15+ hex chars)
             match = re.search(r'\b(c[0-9a-f]{15,})\b', msg.content)
             if match:
-                return match.group(1)[-8:]
-            for line in msg.content.split("\n"):
+                return match.group(1)  # Return FULL ID, not truncated
+            # Scan Session: lines in reverse to get last non-empty value
+            for line in reversed(msg.content.split("\n")):
                 line = line.strip()
                 if line.startswith("Session:"):
                     val = line.replace("Session:", "").strip()
-                    return val[-8:] if len(val) >= 8 else val
-    return str(abs(hash(tuple(m.content for m in messages))))[-8:]
+                    if val:  # Skip empty Session: lines
+                        return val  # Return FULL value, not truncated
+    return uuid.uuid4().hex  # Unique fallback so nothing collides
 
 
 def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
