@@ -566,6 +566,7 @@ async def chat_completions(
     messages = request.messages
 
     user_query = next((m.content for m in reversed(messages) if m.role == "user"), None)
+    print(f"[STT] raw input: {user_query!r}", flush=True)
     if not user_query:
         raise HTTPException(status_code=400, detail="No user message found")
 
@@ -673,6 +674,7 @@ async def create_tavus_conversation(_token: str = Depends(verify_token)):
                 "replica_id": TAVUS_REPLICA_ID,
                 "conversation_name": f"Enara Tutor - {session_id[:8]}",
                 "conversational_context": f"Session: {session_id}",
+                "properties": {"language": "Arabic"},  # STT hint for bilingual transcription
             }
             print(f"[TAVUS] Creating conversation: persona_id={pal_id} session={session_id[:8]}", flush=True)
             resp = await client.post(
