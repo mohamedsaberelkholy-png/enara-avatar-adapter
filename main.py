@@ -3,7 +3,6 @@ Enara AI <-> Tavus Adapter
 """
 
 import json
-import re
 import time
 import uuid
 import httpx
@@ -11,23 +10,21 @@ import os
 import asyncio
 import redis.asyncio as aioredis
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
 
-ENARA_BASE_URL    = os.environ["ENARA_BASE_URL"]
-ENARA_API_KEY     = os.environ["ENARA_API_KEY"]
-ADAPTER_TOKEN     = os.environ["ADAPTER_TOKEN"]
-TAVUS_API_KEY     = os.environ["TAVUS_API_KEY"]
-TAVUS_REPLICA_ID  = os.environ["TAVUS_REPLICA_ID"]
-TAVUS_PAL_ID      = os.environ.get("TAVUS_PAL_ID", "")
+ENARA_BASE_URL   = os.environ["ENARA_BASE_URL"]
+ENARA_API_KEY    = os.environ["ENARA_API_KEY"]
+ADAPTER_TOKEN    = os.environ["ADAPTER_TOKEN"]
+TAVUS_API_KEY    = os.environ["TAVUS_API_KEY"]
+TAVUS_REPLICA_ID = os.environ["TAVUS_REPLICA_ID"]
+TAVUS_PAL_ID     = os.environ.get("TAVUS_PAL_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-REDIS_URL         = os.environ.get("REDIS_URL", "")
-
-LANG_TTL = 7200  # 2 hours
+REDIS_URL = os.environ.get("REDIS_URL", "")
 
 redis_client: aioredis.Redis | None = None
 
@@ -41,30 +38,11 @@ async def warmup_modal():
                 await client.post(
                     f"{ENARA_BASE_URL}/chat/query",
                     headers={"X-API-Key": ENARA_API_KEY, "Content-Type": "application/json"},
-                    json={
-                        "course_id": "336627af-732e-4349-bda8-b73c702dcf42",
-                        "query": ".",
-                        "section_ids": [],
-                        "teaching_method": "socratic",
-                        "chat_history": [],
-                        "language": "english",
-                    },
+                    json={"course_id": "336627af-732e-4349-bda8-b73c702dcf42", "query": ".", "section_ids": [], "teaching_method": "socratic", "chat_history": [], "language": "english"},
                 )
         except Exception:
             pass
         await asyncio.sleep(90)
-
-
-async def prewarm_modal():
-    """Single ping to Modal health endpoint — called at conversation creation."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.get(
-                f"{ENARA_BASE_URL}/health",
-                headers={"X-API-Key": ENARA_API_KEY},
-            )
-    except Exception:
-        pass
 
 
 @asynccontextmanager
@@ -102,7 +80,6 @@ class ChatMessage(BaseModel):
     role: str
     content: str
 
-
 class ChatCompletionRequest(BaseModel):
     model: str = "enara-tutor"
     messages: list[ChatMessage]
@@ -112,11 +89,8 @@ class ChatCompletionRequest(BaseModel):
     teaching_method: Optional[str] = "socratic"
 
 
-# ---------------------------------------------------------------------------
-# Message parsing helpers
-# ---------------------------------------------------------------------------
-
 def extract_enara_context(messages: list[ChatMessage]) -> dict:
+    """Extract course context and session key from system messages."""
     for msg in messages:
         if msg.role == "system":
             try:
@@ -128,16 +102,27 @@ def extract_enara_context(messages: list[ChatMessage]) -> dict:
 
 
 def extract_session_key(messages: list[ChatMessage]) -> str:
+    """Extract session key from Tavus system message.
+    Tavus injects the conversation_id somewhere in the system message.
+    We use the last 8 chars to match what the frontend polls with (conversation_id[-8:]).
+    """
+    import re
     for msg in messages:
         if msg.role == "system":
+            # Look for a Tavus conversation ID pattern (c + hex string)
             match = re.search(r'\b(c[0-9a-f]{15,})\b', msg.content)
             if match:
                 return match.group(1)[-8:]
+            # Fallback: Session: line
             for line in msg.content.split("\n"):
                 line = line.strip()
                 if line.startswith("Session:"):
                     val = line.replace("Session:", "").strip()
-                    return val[-8:] if len(val) >= 8 else val
+                    if len(val) >= 8:
+                        return val[-8:]
+                    elif val:
+                        return val
+    # Fallback: hash of messages
     return str(abs(hash(tuple(m.content for m in messages))))[-8:]
 
 
@@ -149,120 +134,84 @@ def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
     return history
 
 
-# ---------------------------------------------------------------------------
-# Language detection
-# ---------------------------------------------------------------------------
-
-FRANCO_STRONG = {
-    "ya3ni", "ya3ny", "mesh", "msh", "ezay", "leih", "leh",
-    "mafish", "mafesh", "yalla", "khalas", "delwa2ty", "delwaqti",
-    "ba3dein", "b3deen", "3alshan", "3shan", "3andi", "3ndi",
-    "3ayiz", "aayiz", "mumkin", "momken", "lazim", "laazim",
+# Franco-Arabic words commonly used by Egyptian/Arab students
+FRANCO_ARABIC = {
+    "ana", "enta", "enti", "mesh", "msh", "fe", "fi", "3andi", "3ndi",
+    "leih", "leh", "ezay", "bas", "ya3ni", "ya3ny", "keda", "kida",
+    "zay", "law", "meen", "fein", "fyn", "el", "al", "wala", "walla",
+    "aho", "taman", "tamam", "mafish", "mafesh", "mumkin", "momken",
+    "3alshan", "3shan", "tayeb", "tayyeb", "yalla", "khalas", "خلاص",
+    "momkn", "lazim", "laazim", "aayiz", "3ayiz", "mish", "miش"
 }
 
-FRANCO_BROAD = FRANCO_STRONG | {
-    "ana", "enta", "enti", "fe", "fi", "keda", "kida",
-    "zay", "law", "meen", "fein", "fyn", "wala", "walla",
-    "aho", "taman", "tamam", "tayeb", "tayyeb", "howa", "hiya",
-    "ihna", "shoof", "shof", "7aga", "kol", "kull", "aslan",
-    "awy", "gedan", "sa3at", "el", "al", "bas",
-}
-
-ARABIC_PHRASES = [
-    "in arabic", "explain in arabic", "respond in arabic", "answer in arabic",
-    "باللغة العربية", "بالعربي", "بالعربية", "translate to arabic",
-    "say it in arabic", "tell me in arabic", "switch to arabic",
-    "speak arabic", "talk arabic",
+# Explicit Arabic request phrases in English
+ARABIC_REQUEST_PHRASES = [
+    "in arabic", "explain in arabic", "respond in arabic",
+    "answer in arabic", "باللغة العربية", "بالعربي", "بالعربية",
+    "translate to arabic", "say it in arabic", "tell me in arabic"
 ]
-ENGLISH_PHRASES = [
-    "in english", "explain in english", "respond in english", "answer in english",
-    "بالانجليزي", "بالإنجليزية", "بالانجليزية", "translate to english",
-    "say it in english", "tell me in english", "switch to english",
-    "speak english", "talk english",
+
+# Explicit English request phrases
+ENGLISH_REQUEST_PHRASES = [
+    "in english", "explain in english", "respond in english",
+    "answer in english", "بالانجليزي", "بالإنجليزية", "بالانجليزية",
+    "translate to english", "say it in english", "tell me in english"
 ]
 
 
-def detect_language_from_text(text: str) -> tuple[str, str]:
+def detect_language(text: str) -> str:
+    """Detect if the message is Arabic or English using multiple signals."""
     text_lower = text.lower().strip()
 
-    for phrase in ARABIC_PHRASES:
+    # 1. Explicit language request — highest priority
+    for phrase in ARABIC_REQUEST_PHRASES:
         if phrase in text_lower:
-            return "arabic", "explicit_phrase"
-    for phrase in ENGLISH_PHRASES:
+            return "arabic"
+    for phrase in ENGLISH_REQUEST_PHRASES:
         if phrase in text_lower:
-            return "english", "explicit_phrase"
+            return "english"
 
-    total = len(text.replace(" ", ""))
-    arabic_chars = sum(1 for c in text if "\u0600" <= c <= "\u06FF")
-    if total > 0:
-        if total <= 10 and arabic_chars > 0:
-            return "arabic", "arabic_script_short"
-        if arabic_chars / total > 0.10:
-            return "arabic", "arabic_script"
+    # 2. Arabic script characters
+    arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+    if arabic_chars > len(text) * 0.15:
+        return "arabic"
 
+    # 3. Franco-Arabic word detection
     words = set(text_lower.split())
-    strong = words & FRANCO_STRONG
-    if strong:
-        return "arabic", f"franco_strong:{next(iter(strong))}"
+    franco_matches = words.intersection(FRANCO_ARABIC)
+    if len(franco_matches) >= 2:
+        return "arabic"
+    if len(franco_matches) == 1 and len(words) <= 6:
+        return "arabic"
 
-    broad = words & FRANCO_BROAD
-    if len(broad) >= 2:
-        return "arabic", f"franco_multi:{','.join(list(broad)[:3])}"
-    if len(broad) == 1 and len(words) <= 5:
-        return "arabic", f"franco_single_short:{next(iter(broad))}"
-
-    return "english", "default"
+    return "english"
 
 
-async def resolve_language(session_key: str, user_text: str) -> tuple[str, str]:
-    text_lower = user_text.lower().strip()
+def normalize_query(text: str, language: str) -> str:
+    """Clean and normalize the query before sending to Enara."""
+    import re
 
-    switch_to: str | None = None
-    for phrase in ARABIC_PHRASES:
-        if phrase in text_lower:
-            switch_to = "arabic"
-            break
-    if not switch_to:
-        for phrase in ENGLISH_PHRASES:
-            if phrase in text_lower:
-                switch_to = "english"
-                break
-
-    if switch_to:
-        if redis_client:
-            await redis_client.setex(f"lang:{session_key}", LANG_TTL, switch_to)
-        return switch_to, "override"
-
-    if redis_client:
-        pinned = await redis_client.get(f"lang:{session_key}")
-        if pinned:
-            return pinned, "pinned"
-
-    lang, signal = detect_language_from_text(user_text)
-    return lang, f"detected:{signal}"
-
-
-# ---------------------------------------------------------------------------
-# Query normalization
-# ---------------------------------------------------------------------------
-
-def normalize_query(text: str) -> str:
+    # Strip leading/trailing whitespace
     text = text.strip()
-    text = re.sub(r"<[^>]+>", "", text).strip()
-    text = re.sub(r"\.{3,}", ".", text)
-    text = re.sub(r"\?{2,}", "?", text)
-    text = re.sub(r"!{2,}", "!", text)
-    text = re.sub(r"\s{2,}", " ", text)
-    return text.strip()
 
+    # Remove Tavus internal tags (perception/audio analysis metadata)
+    text = re.sub(r'<[^>]+>', '', text).strip()
 
-def is_tavus_internal(text: str) -> bool:
-    return "<user_audio_analysis>" in text or "The speaker sounds" in text
+    # Remove common Tavus STT artifacts
+    text = re.sub(r'\.{3,}', '.', text)        # multiple dots → single
+    text = re.sub(r'\?{2,}', '?', text)        # multiple ? → single
+    text = re.sub(r'!{2,}', '!', text)         # multiple ! → single
+    text = re.sub(r'\s{2,}', ' ', text)        # multiple spaces → single
 
+    # If Franco-Arabic detected, append a hint for Enara to respond in Arabic
+    if language == "arabic":
+        text_lower = text.lower()
+        franco_matches = set(text_lower.split()).intersection(FRANCO_ARABIC)
+        if franco_matches and not any(c for c in text if '؀' <= c <= 'ۿ'):
+            text = text + " [الرجاء الرد بالعربية]"
 
-# ---------------------------------------------------------------------------
-# SSE helpers
-# ---------------------------------------------------------------------------
+    return text
+
 
 def sse_chunk(content: str, model: str, finish: bool = False) -> str:
     chunk = {
@@ -274,35 +223,29 @@ def sse_chunk(content: str, model: str, finish: bool = False) -> str:
             "index": 0,
             "delta": {"content": content} if not finish else {},
             "finish_reason": "stop" if finish else None,
-        }],
+        }]
     }
     return f"data: {json.dumps(chunk)}\n\n"
 
 
-async def silent_stream(model: str):
-    yield sse_chunk("", model, finish=True)
-    yield "data: [DONE]\n\n"
-
-
-# ---------------------------------------------------------------------------
-# Visual aid generation
-# ---------------------------------------------------------------------------
-
 async def generate_visual(question: str, answer: str, session_key: str):
-    if not ANTHROPIC_API_KEY or not redis_client:
+    """Ask Claude Haiku if a visual is needed and generate it if so."""
+    if not ANTHROPIC_API_KEY:
+        print("generate_visual: no ANTHROPIC_API_KEY set", flush=True)
         return
 
-    prompt = (
-        "You are a visual aid generator for an AI tutor.\n\n"
-        f"Student question: {question}\n"
-        f"Tutor answer: {answer}\n\n"
-        "Decide if a visual aid would genuinely help (grammar tables, verb conjugations, "
-        "comparisons, timelines, vocabulary lists, step-by-step processes, email structure). "
-        "Simple conversational exchanges do NOT need visuals.\n\n"
-        "If yes: respond with ONLY a clean self-contained HTML snippet using inline styles. "
-        "White background, teal (#0A5F6D) accent, max-width 100%.\n"
-        "If no: respond with exactly: NO_VISUAL"
-    )
+    prompt = f"""You are a visual aid generator for an AI tutor.
+
+Student question: {question}
+Tutor answer: {answer}
+
+Decide if a visual aid would genuinely help understanding (grammar tables, verb conjugations, 
+comparisons, timelines, vocabulary lists, step-by-step processes, email structure diagrams).
+Simple conversational exchanges do NOT need visuals.
+
+If a visual would help: respond with ONLY a clean, self-contained HTML snippet using inline styles.
+Use a white background, clean fonts, teal (#0A5F6D) as accent color, max-width 100%.
+If no visual is needed: respond with exactly: NO_VISUAL"""
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -316,23 +259,21 @@ async def generate_visual(question: str, answer: str, session_key: str):
                 json={
                     "model": "claude-haiku-4-5-20251001",
                     "max_tokens": 1024,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
+                    "messages": [{"role": "user", "content": prompt}]
+                }
             )
             resp.raise_for_status()
-            result = resp.json()["content"][0]["text"].strip()
+            data = resp.json()
+            result = data["content"][0]["text"].strip()
             print(f"generate_visual key={session_key}: {result[:80]}", flush=True)
 
             if result != "NO_VISUAL" and "<" in result:
-                await redis_client.setex(f"artifact:{session_key}", 120, result)
-                print(f"Visual stored → artifact:{session_key}", flush=True)
+                if redis_client:
+                    await redis_client.setex(f"artifact:{session_key}", 120, result)
+                    print(f"Visual stored in Redis key=artifact:{session_key}", flush=True)
     except Exception as e:
         print(f"Visual generation error: {e}", flush=True)
 
-
-# ---------------------------------------------------------------------------
-# Tavus persona management
-# ---------------------------------------------------------------------------
 
 async def get_or_create_pal(client: httpx.AsyncClient) -> str:
     global TAVUS_PAL_ID
@@ -359,26 +300,18 @@ async def get_or_create_pal(client: httpx.AsyncClient) -> str:
                     "api_key": ADAPTER_TOKEN,
                     "speculative_inference": False,
                 }
-            },
-        },
+            }
+        }
     )
     resp.raise_for_status()
-    TAVUS_PAL_ID = resp.json()["persona_id"]
+    data = resp.json()
+    TAVUS_PAL_ID = data["persona_id"]
     return TAVUS_PAL_ID
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "pal_id": TAVUS_PAL_ID or "not yet created"}
 
 
 @app.get("/v1/artifact/{session_key}")
 async def get_artifact(session_key: str):
-    """Poll for a visual artifact. Consumed on first read."""
+    """Poll for a visual artifact. Returns html if available, null if not."""
     if redis_client:
         html = await redis_client.get(f"artifact:{session_key}")
         if html:
@@ -387,48 +320,47 @@ async def get_artifact(session_key: str):
     return {"html": None, "session_key": session_key}
 
 
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "pal_id": TAVUS_PAL_ID or "not yet created"}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
-    _token: str = Depends(verify_token),
+    _token: str = Depends(verify_token)
 ):
     messages = request.messages
+    if not messages:
+        raise HTTPException(status_code=400, detail="No messages provided")
 
     user_query = next(
-        (m.content for m in reversed(messages) if m.role == "user"), None
+        (m.content for m in reversed(messages) if m.role == "user"),
+        None
     )
     if not user_query:
         raise HTTPException(status_code=400, detail="No user message found")
 
-    if is_tavus_internal(user_query):
-        print(f"Dropping internal Tavus message: {user_query[:60]!r}", flush=True)
-        return StreamingResponse(
-            silent_stream(request.model),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    ctx             = extract_enara_context(messages)
+    ctx = extract_enara_context(messages)
     course_id       = request.course_id       or ctx.get("course_id", "336627af-732e-4349-bda8-b73c702dcf42")
     section_ids     = request.section_ids     or ctx.get("section_ids", [])
     teaching_method = request.teaching_method or ctx.get("teaching_method", "socratic")
+    language        = detect_language(user_query)
+    normalized_query = normalize_query(user_query, language)
     session_key     = extract_session_key(messages)
 
-    language, lang_source = await resolve_language(session_key, user_query)
+    print(f"chat_completions: lang={language} session={session_key} query={normalized_query[:40]}", flush=True)
 
-    normalized_query = normalize_query(user_query)
-    if not normalized_query:
-        print(f"[{session_key}] Empty query after normalization, dropping.", flush=True)
-        return StreamingResponse(
-            silent_stream(request.model),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    print(
-        f"[{session_key}] lang={language} ({lang_source}) | query={normalized_query[:60]!r}",
-        flush=True,
-    )
+    # Drop Tavus internal analysis messages entirely
+    if not normalized_query.strip() or "<user_audio_analysis>" in user_query or "The speaker sounds" in normalized_query:
+        print(f"Dropping internal Tavus message: {user_query[:60]}", flush=True)
+        async def empty_generate():
+            yield sse_chunk("", request.model, finish=True)
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(empty_generate(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if normalized_query != user_query:
+        print(f"normalized: {normalized_query[:60]}", flush=True)
 
     enara_payload = {
         "course_id":       course_id,
@@ -444,24 +376,20 @@ async def chat_completions(
             try:
                 resp = await client.post(
                     f"{ENARA_BASE_URL}/chat/query",
-                    headers={
-                        "X-API-Key": ENARA_API_KEY,
-                        "Content-Type": "application/json",
-                    },
+                    headers={"X-API-Key": ENARA_API_KEY, "Content-Type": "application/json"},
                     json=enara_payload,
                 )
                 resp.raise_for_status()
                 data = resp.json()
+
             except httpx.TimeoutException:
                 yield sse_chunk("Sorry, the tutoring service timed out. Please try again.", request.model)
                 yield sse_chunk("", request.model, finish=True)
                 yield "data: [DONE]\n\n"
                 return
+
             except httpx.HTTPStatusError as e:
-                yield sse_chunk(
-                    f"Backend error ({e.response.status_code}). Please try again.",
-                    request.model,
-                )
+                yield sse_chunk(f"Backend error ({e.response.status_code}). Please try again.", request.model)
                 yield sse_chunk("", request.model, finish=True)
                 yield "data: [DONE]\n\n"
                 return
@@ -471,7 +399,8 @@ async def chat_completions(
 
         words = answer.split(" ")
         for i, word in enumerate(words):
-            yield sse_chunk(word + (" " if i < len(words) - 1 else ""), request.model)
+            chunk = word + (" " if i < len(words) - 1 else "")
+            yield sse_chunk(chunk, request.model)
 
         yield sse_chunk("", request.model, finish=True)
         yield "data: [DONE]\n\n"
@@ -479,74 +408,62 @@ async def chat_completions(
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
-
-
-@app.post("/v1/tavus/conversation")
-async def create_tavus_conversation(_token: str = Depends(verify_token)):
-    """
-    Create a Tavus conversation. Always sends Arabic STT hint for best
-    bilingual transcription quality. Language detection is per-message.
-    """
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        try:
-            pal_id = await get_or_create_pal(client)
-            asyncio.create_task(prewarm_modal())
-
-            payload = {
-                "persona_id": pal_id,
-                "replica_id": TAVUS_REPLICA_ID,
-                "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}",
-                "properties": {"language": "Arabic"},  # STT hint only
-            }
-            print(
-                f"Tavus create: persona_id={pal_id} replica_id={TAVUS_REPLICA_ID} "
-                f"api_key={TAVUS_API_KEY[:8]}...",
-                flush=True,
-            )
-
-            resp = await client.post(
-                "https://tavusapi.com/v2/conversations",
-                headers={"x-api-key": TAVUS_API_KEY, "Content-Type": "application/json"},
-                json=payload,
-            )
-            print(f"Tavus response {resp.status_code}: {resp.text}", flush=True)
-            resp.raise_for_status()
-            data = resp.json()
-
-            return {
-                "conversation_url": data["conversation_url"],
-                "conversation_id": data["conversation_id"],
-            }
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Tavus API error: {e.response.status_code} - {e.response.text}",
-            )
 
 
 @app.delete("/v1/tavus/conversation/{conversation_id}")
 async def end_tavus_conversation(
     conversation_id: str,
-    _token: str = Depends(verify_token),
+    _token: str = Depends(verify_token)
 ):
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.delete(
                 f"https://tavusapi.com/v2/conversations/{conversation_id}",
-                headers={"x-api-key": TAVUS_API_KEY},
+                headers={"x-api-key": TAVUS_API_KEY}
             )
             resp.raise_for_status()
-
-            session_key = conversation_id[-8:]
-            if redis_client:
-                await redis_client.delete(f"lang:{session_key}", f"artifact:{session_key}")
-                print(f"Redis cleanup: lang:{session_key} artifact:{session_key}", flush=True)
-
             return {"ended": True, "conversation_id": conversation_id}
         except httpx.HTTPStatusError as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Tavus API error: {e.response.status_code} - {e.response.text}",
+            raise HTTPException(status_code=502, detail=f"Tavus API error: {e.response.status_code} - {e.response.text}")
+
+
+@app.post("/v1/tavus/conversation")
+async def create_tavus_conversation(lang: str = "ar", _token: str = Depends(verify_token)):
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            pal_id = await get_or_create_pal(client)
+
+            async def prewarm():
+                try:
+                    await client.get(f"{ENARA_BASE_URL}/health", headers={"X-API-Key": ENARA_API_KEY}, timeout=5.0)
+                except Exception:
+                    pass
+            asyncio.create_task(prewarm())
+
+            tavus_language = "Arabic" if lang == "ar" else "English"
+            payload = {
+                "persona_id": pal_id,
+                "replica_id": TAVUS_REPLICA_ID,
+                "conversation_name": f"Enara Tutor - {uuid.uuid4().hex[:8]}",
+                "properties": {
+                    "language": tavus_language
+                }
+            }
+            print(f"DEBUG sending to Tavus: persona_id={pal_id} replica_id={TAVUS_REPLICA_ID} api_key={TAVUS_API_KEY[:8]}", flush=True)
+
+            resp = await client.post(
+                "https://tavusapi.com/v2/conversations",
+                headers={"x-api-key": TAVUS_API_KEY, "Content-Type": "application/json"},
+                json=payload
             )
+            print(f"DEBUG Tavus response {resp.status_code}: {resp.text}", flush=True)
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "conversation_url": data["conversation_url"],
+                "conversation_id": data["conversation_id"]
+            }
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"Tavus API error: {e.response.status_code} - {e.response.text}")
