@@ -566,9 +566,6 @@ async def chat_completions(
     messages = request.messages
 
     user_query = next((m.content for m in reversed(messages) if m.role == "user"), None)
-    user_query = next((m.content for m in reversed(messages) if m.role == "user"), None)
-print(f"[STT] raw input: {user_query!r}", flush=True)  # ADD HERE
-if not user_query:
     if not user_query:
         raise HTTPException(status_code=400, detail="No user message found")
 
