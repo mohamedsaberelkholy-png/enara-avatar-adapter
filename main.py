@@ -60,28 +60,25 @@ async def lifespan(app: FastAPI):
     global redis_client
     if REDIS_URL:
         try:
-            # Upstash Redis requires SSL connection
-            # Handle both redis:// and rediss:// protocols
+            # Upstash requires rediss:// (SSL). Upgrade redis:// automatically.
             redis_url = REDIS_URL
-            if redis_url.startswith("redis://") and not redis_url.startswith("rediss://"):
-                redis_url = redis_url.replace("redis://", "rediss://", 1)
-            
+            if redis_url.startswith("redis://"):
+                redis_url = "rediss://" + redis_url[8:]
+            print(f"[REDIS] Connecting to: {redis_url[:50]}...", flush=True)
+
             redis_client = aioredis.from_url(
                 redis_url,
                 decode_responses=True,
-                ssl=True,
-                ssl_certfile=None,
-                ssl_keyfile=None,
-                ssl_cert_reqs="required"
+                socket_connect_timeout=5,
+                socket_timeout=5,
             )
-            # Test connection immediately
             await redis_client.ping()
-            print(f"✅ Redis connected successfully to Upstash", flush=True)
+            print("[REDIS] Connected successfully", flush=True)
         except Exception as e:
-            print(f"❌ Redis connection failed: {type(e).__name__}: {e}", flush=True)
+            print(f"[REDIS] Connection failed: {type(e).__name__}: {e}", flush=True)
             redis_client = None
     else:
-        print("⚠️  WARNING: No REDIS_URL set — visuals will NOT work", flush=True)
+        print("[REDIS] WARNING: No REDIS_URL set - visuals will NOT work", flush=True)
     
     asyncio.create_task(warmup_modal())
     yield
