@@ -70,12 +70,10 @@ async def lifespan(app: FastAPI):
     global redis_client
     if REDIS_URL:
         try:
-            # Upstash requires rediss:// (SSL). Upgrade redis:// automatically.
             redis_url = REDIS_URL
             if redis_url.startswith("redis://"):
                 redis_url = "rediss://" + redis_url[8:]
             print(f"[REDIS] Connecting to: {redis_url[:50]}...", flush=True)
-
             redis_client = aioredis.from_url(
                 redis_url,
                 decode_responses=True,
@@ -89,16 +87,16 @@ async def lifespan(app: FastAPI):
             redis_client = None
     else:
         print("[REDIS] WARNING: No REDIS_URL set - visuals will NOT work", flush=True)
-    
+
     asyncio.create_task(warmup_modal())
     yield
-    
+
     if redis_client:
         try:
             await redis_client.aclose()
-            print("✅ Redis connection closed", flush=True)
+            print("[REDIS] Connection closed", flush=True)
         except Exception as e:
-            print(f"Error closing Redis: {e}", flush=True)
+            print(f"[REDIS] Error closing: {e}", flush=True)
 
 
 app = FastAPI(title="Enara Avatar Adapter", lifespan=lifespan)
@@ -153,14 +151,12 @@ def extract_enara_context(messages: list[ChatMessage]) -> dict:
 def extract_session_key(messages: list[ChatMessage]) -> str:
     for msg in messages:
         if msg.role == "system":
-            # Check Session: lines FIRST (most reliable — we inject this)
             for line in reversed(msg.content.split("\n")):
                 line = line.strip()
                 if line.startswith("Session:"):
                     val = line.replace("Session:", "").strip()
                     if val:
                         return val
-            # Fallback: Tavus conversation ID pattern (c + 15+ hex chars)
             match = re.search(r"\b(c[0-9a-f]{15,})\b", msg.content)
             if match:
                 return match.group(1)
@@ -176,90 +172,203 @@ def build_chat_history(messages: list[ChatMessage]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Language detection
+# Language detection — multi-dialect, score-based
 # ---------------------------------------------------------------------------
 
-FRANCO_STRONG = {
-    "ya3ni", "ya3ny", "mesh", "msh", "ezay", "leih", "leh",
-    "mafish", "mafesh", "yalla", "khalas", "delwa2ty", "delwaqti",
-    "ba3dein", "b3deen", "3alshan", "3shan", "3andi", "3ndi",
-    "3ayiz", "aayiz", "mumkin", "momken", "lazim", "laazim",
+ARABIC_SWITCH_PHRASES = [
+    "in arabic", "respond in arabic", "answer in arabic", "explain in arabic",
+    "speak arabic", "say it in arabic", "tell me in arabic", "switch to arabic",
+    "use arabic", "باللغة العربية", "بالعربي", "بالعربية", "بالعربية من فضلك",
+    "كلمني عربي", "رد بالعربي", "تكلم عربي",
+]
+ENGLISH_SWITCH_PHRASES = [
+    "in english", "respond in english", "answer in english", "explain in english",
+    "speak english", "say it in english", "tell me in english", "switch to english",
+    "use english", "بالانجليزي", "بالإنجليزية", "بالانجليزية",
+    "كلمني انجليزي", "رد بالانجليزي",
+]
+
+# Franco-Arabic number-as-letter context — unambiguous signal
+FRANCO_NUMBER_CONTEXT = re.compile(
+    r"\b(ya3ni|ya3ny|3ayiz|3arif|3andi|3alshan|ba3d|b3d|2ana|2enta|7aga|7abibi|sa7|"
+    r"msh|knt|bnt|w2t|f2|m3|t3|b3|l2|3l|3n|f3l)\b",
+    re.IGNORECASE
+)
+
+# Egyptian Arabic
+EGYPTIAN = {
+    "ya3ni", "ya3ny", "ezay", "leih", "leh", "mafish", "mafesh",
+    "yalla", "khalas", "delwa2ty", "ba3dein", "b3deen", "3alshan", "3shan",
+    "3andi", "3ndi", "3ayiz", "aayiz", "mumkin", "momken", "lazim",
+    "mesh", "msh", "keda", "kida", "zay", "meen", "fein", "fyn",
+    "aho", "tamam", "tayeb", "tayyeb", "howa", "hiya", "ihna",
+    "shoof", "shof", "7aga", "aslan", "awy", "gedan", "walla",
+    "ana", "enta", "enti", "bas", "law", "wala", "fe", "fi",
+    "beta3", "beta3ti", "el", "hategy", "gayy", "raye7",
+    "ma3lesh", "maashi", "afandem",
 }
 
-FRANCO_BROAD = FRANCO_STRONG | {
-    "ana", "enta", "enti", "fe", "fi", "keda", "kida",
-    "zay", "law", "meen", "fein", "fyn", "wala", "walla",
-    "aho", "taman", "tamam", "tayeb", "tayyeb", "howa", "hiya",
-    "ihna", "shoof", "shof", "7aga", "kol", "kull", "aslan",
-    "awy", "gedan", "sa3at", "el", "al", "bas",
+# Levantine (Syrian, Lebanese, Palestinian, Jordanian)
+LEVANTINE = {
+    "shu", "shno", "kifak", "kifik", "kif", "wein", "wayn", "wen",
+    "haida", "hayde", "hek", "la2", "mnih", "mnee7", "3m", "3am",
+    "baddak", "baddi", "bade", "hayda", "shou",
+    "halla2", "hala2", "hon", "hone", "mno", "elo",
+    "shi", "ktir", "leish", "laish", "yimkin",
+    "akh", "wallah", "mashallah", "habibi", "habibti",
 }
 
-ARABIC_PHRASES = [
-    "in arabic", "explain in arabic", "respond in arabic", "answer in arabic",
-    "باللغة العربية", "بالعربي", "بالعربية", "translate to arabic",
-    "say it in arabic", "tell me in arabic", "switch to arabic",
+# Gulf (Saudi, UAE, Kuwait, Qatar, Bahrain)
+GULF = {
+    "shlon", "shlonk", "shfih", "laish", "liwain", "wain",
+    "abee", "abi", "agdar", "zain", "zayn",
+    "esh", "cham", "shda3wa", "mafi", "khosh",
+    "inzain", "tara", "wayed", "kafi",
+    "mashallah", "wallah", "yalla", "habibi",
+}
+
+# Moroccan Darija
+MOROCCAN = {
+    "wach", "bghit", "ma3andish", "kifash", "fin", "mnin",
+    "wakha", "ewa", "mzyan", "bzzaf", "shwiya", "daba",
+    "hna", "huma", "nta", "nti",
+    "mashi", "makaynsh", "kayn", "fach",
+    "3andek", "3andi",
+}
+
+# Phonetic Arabic patterns (common in Whisper STT output)
+PHONETIC_PATTERNS = [
+    re.compile(r"\binsh[ae]ll?[ae]h\b", re.IGNORECASE),
+    re.compile(r"\bwall?[ae]h\b", re.IGNORECASE),
+    re.compile(r"\bhab[ie]b[it]?[ia]?\b", re.IGNORECASE),
+    re.compile(r"\bmash?all?[ae]h\b", re.IGNORECASE),
+    re.compile(r"\b(marh?aba|ahlan|salam)\b", re.IGNORECASE),
+    re.compile(r"\byall?a\b", re.IGNORECASE),
+    re.compile(r"\b(shukran|shoukran)\b", re.IGNORECASE),
+    re.compile(r"\bmabrook\b", re.IGNORECASE),
+    re.compile(r"\btayyeb\b", re.IGNORECASE),
+    re.compile(r"\b(aiwa|aywa)\b", re.IGNORECASE),
+    re.compile(r"\bmumk[iy]n\b", re.IGNORECASE),
+    re.compile(r"\b(tab3an|tab3n)\b", re.IGNORECASE),
 ]
-ENGLISH_PHRASES = [
-    "in english", "explain in english", "respond in english", "answer in english",
-    "بالانجليزي", "بالإنجليزية", "بالانجليزية", "translate to english",
-    "say it in english", "tell me in english", "switch to english",
-]
+
+ALL_ARABIC_WORDS = EGYPTIAN | LEVANTINE | GULF | MOROCCAN
+
+
+def _score_arabic(text: str) -> tuple[int, list[str]]:
+    """Return (confidence_score, signals). Score >= 2 means Arabic."""
+    signals = []
+    text_lower = text.lower()
+    words = set(text_lower.split())
+
+    # Arabic script — definitive
+    arabic_chars = sum(1 for c in text if "\u0600" <= c <= "\u06FF")
+    total_chars = len(text.replace(" ", ""))
+    if total_chars > 0 and arabic_chars > 0:
+        ratio = arabic_chars / total_chars
+        if ratio > 0.3:
+            signals.append(f"arabic_script:{ratio:.0%}")
+            return 10, signals
+        elif ratio > 0.1:
+            signals.append(f"arabic_script_mixed:{ratio:.0%}")
+            return 8, signals
+
+    # Franco number patterns — very high confidence
+    if FRANCO_NUMBER_CONTEXT.search(text_lower):
+        match = FRANCO_NUMBER_CONTEXT.search(text_lower)
+        signals.append(f"franco_number:{match.group()}")
+        return 9, signals
+
+    # Dialect word matching
+    matched_words = words & ALL_ARABIC_WORDS
+    if matched_words:
+        score = min(len(matched_words) * 3, 9)
+        signals.append(f"dialect_words:{','.join(list(matched_words)[:4])}")
+        return score, signals
+
+    # Phonetic patterns from STT
+    for pattern in PHONETIC_PATTERNS:
+        m = pattern.search(text_lower)
+        if m:
+            signals.append(f"phonetic:{m.group()}")
+            return 6, signals
+
+    # Arabic phoneme clusters in short text
+    if len(words) <= 3:
+        arabic_phonemes = re.compile(
+            r"\b(kh|gh|3|7|2|ain|ghayn|qaf)\w*\b",
+            re.IGNORECASE
+        )
+        if arabic_phonemes.search(text_lower):
+            signals.append("arabic_phonemes")
+            return 4, signals
+
+    return 0, []
 
 
 def detect_language_from_text(text: str) -> tuple[str, str]:
+    """Returns (language, signal_description)."""
+    if not text.strip():
+        return "english", "empty"
+
     text_lower = text.lower().strip()
-    for phrase in ARABIC_PHRASES:
+
+    # 1. Explicit switch phrases
+    for phrase in ARABIC_SWITCH_PHRASES:
         if phrase in text_lower:
-            return "arabic", "explicit_phrase"
-    for phrase in ENGLISH_PHRASES:
+            return "arabic", f"explicit:{phrase}"
+    for phrase in ENGLISH_SWITCH_PHRASES:
         if phrase in text_lower:
-            return "english", "explicit_phrase"
-    total = len(text.replace(" ", ""))
-    arabic_chars = sum(1 for c in text if "\u0600" <= c <= "\u06FF")
-    if total > 0:
-        if total <= 10 and arabic_chars > 0:
-            return "arabic", "arabic_script_short"
-        if arabic_chars / total > 0.10:
-            return "arabic", "arabic_script"
+            return "english", f"explicit:{phrase}"
+
+    # 2. Score-based detection
+    score, signals = _score_arabic(text)
+    if score >= 2:
+        return "arabic", "|".join(signals)
+
+    # 3. Code-switching: strong Arabic word in short sentence
     words = set(text_lower.split())
-    strong = words & FRANCO_STRONG
-    if strong:
-        return "arabic", f"franco_strong:{next(iter(strong))}"
-    broad = words & FRANCO_BROAD
-    if len(broad) >= 2:
-        return "arabic", f"franco_multi:{','.join(list(broad)[:3])}"
-    if len(broad) == 1 and len(words) <= 5:
-        return "arabic", f"franco_single_short:{next(iter(broad))}"
+    strong_match = words & (EGYPTIAN | LEVANTINE | GULF)
+    if strong_match and len(words) <= 8:
+        return "arabic", f"codemix:{next(iter(strong_match))}"
+
     return "english", "default"
 
 
 async def resolve_language(session_key: str, user_text: str) -> tuple[str, str]:
+    """Priority: explicit override > Redis pin > auto-detect."""
     text_lower = user_text.lower().strip()
+
     switch_to: str | None = None
-    for phrase in ARABIC_PHRASES:
+    for phrase in ARABIC_SWITCH_PHRASES:
         if phrase in text_lower:
             switch_to = "arabic"
             break
     if not switch_to:
-        for phrase in ENGLISH_PHRASES:
+        for phrase in ENGLISH_SWITCH_PHRASES:
             if phrase in text_lower:
                 switch_to = "english"
                 break
+
     if switch_to:
         if redis_client:
             try:
                 await redis_client.setex(f"lang:{session_key}", LANG_TTL, switch_to)
+                print(f"[LANG] Pinned {switch_to} for session={session_key[:8]}", flush=True)
             except Exception as e:
-                print(f"Redis setex error: {e}", flush=True)
+                print(f"[LANG] Redis pin error: {e}", flush=True)
         return switch_to, "override"
+
     if redis_client:
         try:
             pinned = await redis_client.get(f"lang:{session_key}")
             if pinned:
                 return pinned, "pinned"
         except Exception as e:
-            print(f"Redis get error: {e}", flush=True)
+            print(f"[LANG] Redis get error: {e}", flush=True)
+
     lang, signal = detect_language_from_text(user_text)
+    print(f"[LANG] detected={lang} signal={signal} text={user_text[:40]!r}", flush=True)
     return lang, f"detected:{signal}"
 
 
@@ -302,17 +411,17 @@ async def silent_stream(model: str):
 
 
 # ---------------------------------------------------------------------------
-# Visual aid generation — runs as standalone coroutine, not inside generator
+# Visual aid generation
 # ---------------------------------------------------------------------------
 
 async def generate_visual(question: str, answer: str, session_key: str):
     print(f"[VISUAL] Starting for session_key={session_key}", flush=True)
 
     if not ANTHROPIC_API_KEY:
-        print(f"[VISUAL] No ANTHROPIC_API_KEY set, skipping", flush=True)
+        print("[VISUAL] No ANTHROPIC_API_KEY set, skipping", flush=True)
         return
     if not redis_client:
-        print(f"[VISUAL] No Redis connection, skipping", flush=True)
+        print("[VISUAL] No Redis connection, skipping", flush=True)
         return
 
     prompt = (
@@ -365,7 +474,7 @@ async def generate_visual(question: str, answer: str, session_key: str):
                 except Exception as e:
                     print(f"[VISUAL] ❌ Redis setex failed: {e}", flush=True)
             else:
-                print(f"[VISUAL] No HTML tags in response, skipping", flush=True)
+                print("[VISUAL] No HTML tags in response, skipping", flush=True)
 
     except Exception as e:
         print(f"[VISUAL] ❌ Error: {type(e).__name__}: {e}", flush=True)
@@ -423,14 +532,12 @@ async def health():
             print("[HEALTH] Redis: ✅", flush=True)
         except Exception as e:
             print(f"[HEALTH] Redis: ❌ ({e})", flush=True)
-            redis_ok = False
     else:
         print("[HEALTH] Redis: ⚠️ NOT CONNECTED", flush=True)
-    
     return {
         "status": "healthy",
         "pal_id": TAVUS_PAL_ID or "not yet created",
-        "redis": "connected" if redis_ok else "disconnected"
+        "redis": "connected" if redis_ok else "disconnected",
     }
 
 
@@ -439,7 +546,6 @@ async def get_artifact(session_key: str):
     if not redis_client:
         print(f"[ARTIFACT] Redis not available for session_key={session_key}", flush=True)
         return {"html": None, "session_key": session_key}
-    
     try:
         html = await redis_client.get(f"artifact:{session_key}")
         if html:
@@ -448,7 +554,6 @@ async def get_artifact(session_key: str):
             return {"html": html, "session_key": session_key}
     except Exception as e:
         print(f"[ARTIFACT] ❌ Redis error: {e}", flush=True)
-    
     print(f"[ARTIFACT] No artifact found for session_key={session_key}", flush=True)
     return {"html": None, "session_key": session_key}
 
@@ -478,11 +583,10 @@ async def chat_completions(
     normalized_query = normalize_query(user_query)
 
     if not normalized_query:
-        print(f"[CHAT] Empty query after normalization", flush=True)
+        print("[CHAT] Empty query after normalization", flush=True)
         return StreamingResponse(silent_stream(request.model), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # Very short query (1-2 chars) — likely STT noise, ask to repeat
     if len(normalized_query.strip()) <= 2:
         unclear_msg = UNCLEAR_MESSAGES.get(language, UNCLEAR_MESSAGES["english"])
         print(f"[CHAT] Query too short ({len(normalized_query)} chars) — asking to repeat", flush=True)
@@ -494,7 +598,7 @@ async def chat_completions(
         return StreamingResponse(unclear_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    print(f"[CHAT] lang={language} ({lang_source}) | session={session_key} | query={normalized_query[:50]!r}", flush=True)
+    print(f"[CHAT] lang={language} ({lang_source}) | session={session_key[:8]} | query={normalized_query[:50]!r}", flush=True)
 
     enara_payload = {
         "course_id":       course_id,
@@ -505,7 +609,6 @@ async def chat_completions(
         "language":        language,
     }
 
-    # Call Enara backend first (not inside generator — avoids task cancellation)
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -524,7 +627,7 @@ async def chat_completions(
         return StreamingResponse(timeout_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     except httpx.HTTPStatusError as e:
-        error_msg = "عذراً، حدث خطأ. حاول مرة أخرى." if language == "arabic" else f"Something went wrong. Please try again."
+        error_msg = "عذراً، حدث خطأ. حاول مرة أخرى." if language == "arabic" else "Something went wrong. Please try again."
         async def error_stream():
             yield sse_chunk(error_msg, request.model)
             yield sse_chunk("", request.model, finish=True)
@@ -535,14 +638,12 @@ async def chat_completions(
     answer = data.get("answer", "").strip()
     print(f"[CHAT] Enara answered: {answer[:60]!r}", flush=True)
 
-    # If Enara returned nothing, use a fallback in the detected language
     if not answer:
         answer = FALLBACK_MESSAGES.get(language, FALLBACK_MESSAGES["english"])
         print(f"[CHAT] Empty answer — using fallback in {language}", flush=True)
 
-    # Fire visual generation as top-level task BEFORE returning StreamingResponse
     asyncio.create_task(generate_visual(normalized_query, answer, session_key))
-    print(f"[CHAT] Visual task created for session_key={session_key}", flush=True)
+    print(f"[CHAT] Visual task created for session_key={session_key[:8]}", flush=True)
 
     async def stream_answer():
         words = answer.split(" ")
@@ -565,9 +666,6 @@ async def create_tavus_conversation(_token: str = Depends(verify_token)):
             pal_id = await get_or_create_pal(client)
             asyncio.create_task(prewarm_modal())
 
-            # Generate our own session ID before calling Tavus.
-            # Injected via conversational_context so the LLM endpoint can extract it.
-            # Frontend polls artifacts using this same ID.
             session_id = uuid.uuid4().hex
 
             payload = {
@@ -587,7 +685,6 @@ async def create_tavus_conversation(_token: str = Depends(verify_token)):
             data = resp.json()
             tavus_conv_id = data["conversation_id"]
 
-            # Store Tavus's real conversation ID so DELETE can find it later
             if redis_client:
                 try:
                     await redis_client.setex(f"tavus_id:{session_id}", 86400, tavus_conv_id)
@@ -602,8 +699,7 @@ async def create_tavus_conversation(_token: str = Depends(verify_token)):
 
 @app.delete("/v1/tavus/conversation/{conversation_id}")
 async def end_tavus_conversation(conversation_id: str, _token: str = Depends(verify_token)):
-    # conversation_id here is our session_id. Look up Tavus's real ID from Redis.
-    tavus_conv_id = conversation_id  # fallback: assume it IS the Tavus ID
+    tavus_conv_id = conversation_id
     if redis_client:
         try:
             stored = await redis_client.get(f"tavus_id:{conversation_id}")
@@ -625,7 +721,6 @@ async def end_tavus_conversation(conversation_id: str, _token: str = Depends(ver
             print(f"[END] Tavus conversation {tavus_conv_id} ended", flush=True)
         except httpx.HTTPStatusError as e:
             print(f"[END] Tavus delete error: {e.response.status_code} - {e.response.text}", flush=True)
-            # Don't raise — still clean up Redis below
 
     if redis_client:
         try:
