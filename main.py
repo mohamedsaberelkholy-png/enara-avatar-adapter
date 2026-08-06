@@ -734,6 +734,3 @@ async def end_tavus_conversation(conversation_id: str, _token: str = Depends(ver
             print(f"[END] Redis cleanup error: {e}", flush=True)
 
     return {"ended": True, "conversation_id": conversation_id}
-
-user_query = next((m.content for m in reversed(messages) if m.role == "user"), None)
-print(f"[STT] raw input: {user_query!r}", flush=True)  # ADD THIS
