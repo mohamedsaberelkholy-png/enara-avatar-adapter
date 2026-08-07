@@ -388,7 +388,6 @@ def normalize_query(text: str) -> str:
 
 def extract_user_text(message: str) -> str | None:
     """Strip Tavus internal XML tags. Returns clean user text, or None if nothing left."""
-    import re
     cleaned = re.sub(r'<user_audio_analysis>.*?</user_audio_analysis>', '', message, flags=re.DOTALL).strip()
     return cleaned if cleaned else None
 
@@ -573,16 +572,19 @@ async def chat_completions(
         raise HTTPException(status_code=400, detail="No user message found")
 
     user_query = extract_user_text(user_query)
-if not user_query:
-    print(f"[CHAT] Dropping pure internal Tavus message (no user text)")
-    return StreamingResponse(silent_stream(request.model), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if not user_query:
+        print(f"[CHAT] Dropping pure internal Tavus message (no user text)")
+        return StreamingResponse(
+            silent_stream(request.model), 
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        )
 
-    ctx             = extract_enara_context(messages)
-    course_id       = request.course_id       or ctx.get("course_id", "336627af-732e-4349-bda8-b73c702dcf42")
-    section_ids     = request.section_ids     or ctx.get("section_ids", [])
+    ctx               = extract_enara_context(messages)
+    course_id         = request.course_id         or ctx.get("course_id", "336627af-732e-4349-bda8-b73c702dcf42")
+    section_ids       = request.section_ids       or ctx.get("section_ids", [])
     teaching_method = request.teaching_method or ctx.get("teaching_method", "socratic")
-    session_key     = extract_session_key(messages)
+    session_key       = extract_session_key(messages)
     language, lang_source = await resolve_language(session_key, user_query)
     normalized_query = normalize_query(user_query)
 
@@ -605,12 +607,12 @@ if not user_query:
     print(f"[CHAT] lang={language} ({lang_source}) | session={session_key[:8]} | query={normalized_query[:50]!r}", flush=True)
 
     enara_payload = {
-        "course_id":       course_id,
-        "query":           normalized_query,
-        "section_ids":     section_ids,
+        "course_id":        course_id,
+        "query":            normalized_query,
+        "section_ids":      section_ids,
         "teaching_method": teaching_method,
-        "chat_history":    build_chat_history(messages),
-        "language":        language,
+        "chat_history":     build_chat_history(messages),
+        "language":         language,
     }
 
     try:
