@@ -386,9 +386,11 @@ def normalize_query(text: str) -> str:
     return text.strip()
 
 
-def is_tavus_internal(text: str) -> bool:
-    return "<user_audio_analysis>" in text or "The speaker sounds" in text
-
+def extract_user_text(message: str) -> str | None:
+    """Strip Tavus internal XML tags. Returns clean user text, or None if nothing left."""
+    import re
+    cleaned = re.sub(r'<user_audio_analysis>.*?</user_audio_analysis>', '', message, flags=re.DOTALL).strip()
+    return cleaned if cleaned else None
 
 # ---------------------------------------------------------------------------
 # SSE helpers
@@ -570,9 +572,10 @@ async def chat_completions(
     if not user_query:
         raise HTTPException(status_code=400, detail="No user message found")
 
-    if is_tavus_internal(user_query):
-        print(f"[CHAT] Dropping internal Tavus message: {user_query[:60]!r}", flush=True)
-        return StreamingResponse(silent_stream(request.model), media_type="text/event-stream",
+    user_query = extract_user_text(user_query)
+if not user_query:
+    print(f"[CHAT] Dropping pure internal Tavus message (no user text)")
+    return StreamingResponse(silent_stream(request.model), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     ctx             = extract_enara_context(messages)
